@@ -13,25 +13,33 @@ object CalibrationClient {
 
     private const val CALIBRATION_URL = "https://taclines-backend.onrender.com/calibrate"
 
+    private data class UploadImage(
+        val bitmap: Bitmap,
+        val scaleBackX: Float,
+        val scaleBackY: Float
+    )
+
     fun calibrate(bitmap: Bitmap): AiCalibration {
         return try {
-            val jpegBase64 = bitmapToBase64Jpeg(bitmap)
+            val upload = makeUploadBitmap(bitmap, maxSide = 1280)
+            val jpegBase64 = bitmapToBase64Jpeg(upload.bitmap)
 
             val payload = JSONObject().apply {
                 put("image_base64", jpegBase64)
                 put("game", "8ball_pool")
                 put("task", "calibrate_pool_table")
+                put("original_width", bitmap.width)
+                put("original_height", bitmap.height)
+                put("upload_width", upload.bitmap.width)
+                put("upload_height", upload.bitmap.height)
             }
 
             val conn = URL(CALIBRATION_URL).openConnection() as HttpURLConnection
 
             try {
                 conn.requestMethod = "POST"
-
-                // Render Free + IA pode demorar bastante na primeira chamada
                 conn.connectTimeout = 45000
                 conn.readTimeout = 90000
-
                 conn.doOutput = true
                 conn.useCaches = false
 
@@ -51,6 +59,10 @@ object CalibrationClient {
                     conn.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
                 }
 
+                if (upload.bitmap !== bitmap && !upload.bitmap.isRecycled) {
+                    upload.bitmap.recycle()
+                }
+
                 if (code !in 200..299) {
                     return AiCalibration(
                         ok = false,
@@ -63,7 +75,16 @@ object CalibrationClient {
                     )
                 }
 
-                parseCalibration(body)
+                val parsed = parseCalibration(body)
+
+                // Aqui está a correção principal:
+                // IA devolve coordenadas da imagem reduzida.
+                // O app precisa desenhar na tela original.
+                scaleCalibrationBack(
+                    calibration = parsed,
+                    scaleX = upload.scaleBackX,
+                    scaleY = upload.scaleBackY
+                )
             } finally {
                 conn.disconnect()
             }
@@ -90,31 +111,85 @@ object CalibrationClient {
         }
     }
 
-    private fun bitmapToBase64Jpeg(bitmap: Bitmap): String {
-        val uploadBitmap = resizeForUpload(bitmap, maxSide = 1280)
+    private fun makeUploadBitmap(bitmap: Bitmap, maxSide: Int): UploadImage {
+        val originalW = bitmap.width
+        val originalH = bitmap.height
+        val biggest = maxOf(originalW, originalH)
 
-        val out = ByteArrayOutputStream()
-        uploadBitmap.compress(Bitmap.CompressFormat.JPEG, 76, out)
-
-        if (uploadBitmap !== bitmap && !uploadBitmap.isRecycled) {
-            uploadBitmap.recycle()
+        if (biggest <= maxSide) {
+            return UploadImage(
+                bitmap = bitmap,
+                scaleBackX = 1f,
+                scaleBackY = 1f
+            )
         }
 
+        val scale = maxSide.toFloat() / biggest.toFloat()
+        val uploadW = (originalW * scale).toInt().coerceAtLeast(1)
+        val uploadH = (originalH * scale).toInt().coerceAtLeast(1)
+
+        val resized = Bitmap.createScaledBitmap(bitmap, uploadW, uploadH, true)
+
+        return UploadImage(
+            bitmap = resized,
+            scaleBackX = originalW.toFloat() / uploadW.toFloat(),
+            scaleBackY = originalH.toFloat() / uploadH.toFloat()
+        )
+    }
+
+    private fun bitmapToBase64Jpeg(bitmap: Bitmap): String {
+        val out = ByteArrayOutputStream()
+        bitmap.compress(Bitmap.CompressFormat.JPEG, 78, out)
         return Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
     }
 
-    private fun resizeForUpload(bitmap: Bitmap, maxSide: Int): Bitmap {
-        val w = bitmap.width
-        val h = bitmap.height
-        val biggest = maxOf(w, h)
+    private fun scaleCalibrationBack(
+        calibration: AiCalibration,
+        scaleX: Float,
+        scaleY: Float
+    ): AiCalibration {
+        val radiusScale = (scaleX + scaleY) / 2f
 
-        if (biggest <= maxSide) return bitmap
+        val scaledTable = calibration.table?.let {
+            AiTable(
+                x = it.x * scaleX,
+                y = it.y * scaleY,
+                w = it.w * scaleX,
+                h = it.h * scaleY
+            )
+        }
 
-        val scale = maxSide.toFloat() / biggest.toFloat()
-        val newW = (w * scale).toInt().coerceAtLeast(1)
-        val newH = (h * scale).toInt().coerceAtLeast(1)
+        val scaledCue = calibration.cueBall?.let {
+            AiBall(
+                x = it.x * scaleX,
+                y = it.y * scaleY,
+                r = it.r * radiusScale,
+                color = it.color
+            )
+        }
 
-        return Bitmap.createScaledBitmap(bitmap, newW, newH, true)
+        val scaledBalls = calibration.balls.map {
+            AiBall(
+                x = it.x * scaleX,
+                y = it.y * scaleY,
+                r = it.r * radiusScale,
+                color = it.color
+            )
+        }
+
+        val scaledPockets = calibration.pockets.map {
+            AiPoint(
+                x = it.x * scaleX,
+                y = it.y * scaleY
+            )
+        }
+
+        return calibration.copy(
+            table = scaledTable,
+            cueBall = scaledCue,
+            balls = scaledBalls,
+            pockets = scaledPockets
+        )
     }
 
     private fun extractErrorMessage(body: String): String {
