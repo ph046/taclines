@@ -3,108 +3,644 @@ package com.tac.lines
 import android.graphics.Bitmap
 import android.graphics.Color
 import kotlin.math.abs
+import kotlin.math.atan2
+import kotlin.math.cos
 import kotlin.math.hypot
 import kotlin.math.max
+import kotlin.math.roundToInt
+import kotlin.math.sin
 import kotlin.math.sqrt
 
 data class Ball(val x: Float, val y: Float, val r: Float)
 data class Pocket(val x: Float, val y: Float)
+data class AimLine(val x1: Float, val y1: Float, val x2: Float, val y2: Float)
+
+data class DetectionResult(
+    val cue: Ball?,
+    val balls: List<Ball>,
+    val pockets: List<Pocket>,
+    val aimLine: AimLine?
+)
 
 object Detector {
 
-    private const val SCALE = 0.18f
+    // 0.18 deixava a bola branca quase invisível.
+    // 0.50 fica bem mais forte e ainda rápido.
+    private const val SCALE = 0.50f
+    private const val MAX_BALLS = 15
 
+    private data class Box(
+        val minX: Int,
+        val minY: Int,
+        val maxX: Int,
+        val maxY: Int
+    )
+
+    // Mantém compatibilidade com teu código antigo.
     fun analyze(bmp: Bitmap): Triple<Ball?, List<Ball>, List<Pocket>> {
+        val result = analyzeFull(bmp)
+        return Triple(result.cue, result.balls, result.pockets)
+    }
+
+    // Novo método completo: branca, bolas, caçapas e linha esticada da mira.
+    fun analyzeFull(bmp: Bitmap): DetectionResult {
         val sw = (bmp.width * SCALE).toInt().coerceAtLeast(1)
         val sh = (bmp.height * SCALE).toInt().coerceAtLeast(1)
+
         val small = Bitmap.createScaledBitmap(bmp, sw, sh, false)
         val inv = 1f / SCALE
+
         val pixels = IntArray(sw * sh)
         small.getPixels(pixels, 0, sw, 0, 0, sw, sh)
         small.recycle()
 
-        var minX = sw; var maxX = 0; var minY = sh; var maxY = 0
-        for (y in 0 until sh) for (x in 0 until sw) {
-            val p = pixels[y * sw + x]
-            if (isGreen(Color.red(p), Color.green(p), Color.blue(p))) {
-                if (x < minX) minX = x; if (x > maxX) maxX = x
-                if (y < minY) minY = y; if (y > maxY) maxY = y
-            }
-        }
-        if (minX >= maxX || minY >= maxY) {
-            minX = (sw*0.05f).toInt(); maxX = (sw*0.95f).toInt()
-            minY = (sh*0.08f).toInt(); maxY = (sh*0.92f).toInt()
-        }
+        val table = detectTableBox(pixels, sw, sh)
 
         val visited = BooleanArray(sw * sh)
         val whites = mutableListOf<Ball>()
         val colors = mutableListOf<Ball>()
 
-        for (y in minY..maxY) for (x in minX..maxX) {
-            val idx = y * sw + x
-            if (visited[idx]) continue
-            val p = pixels[idx]
-            val r = Color.red(p); val g = Color.green(p); val b = Color.blue(p)
-            val isW = isWhite(r, g, b)
-            val isC = !isW && isColored(r, g, b)
-            if (!isW && !isC) continue
+        for (y in table.minY..table.maxY) {
+            for (x in table.minX..table.maxX) {
+                val idx = y * sw + x
+                if (idx !in pixels.indices || visited[idx]) continue
 
-            val cluster = mutableListOf<Int>()
-            val q = ArrayDeque<Int>(); q.add(idx)
-            while (q.isNotEmpty() && cluster.size < 700) {
-                val cur = q.removeFirst()
-                if (cur < 0 || cur >= pixels.size || visited[cur]) continue
-                val cp = pixels[cur]
-                val cr = Color.red(cp); val cg = Color.green(cp); val cb = Color.blue(cp)
-                if (!(if (isW) isWhite(cr,cg,cb) else isColored(cr,cg,cb))) continue
-                visited[cur] = true; cluster.add(cur)
-                val cx = cur % sw; val cy = cur / sw
-                if (cx+1<sw) q.add(cur+1); if (cx-1>=0) q.add(cur-1)
-                if (cy+1<sh) q.add(cur+sw); if (cy-1>=0) q.add(cur-sw)
+                val p = pixels[idx]
+                val r = Color.red(p)
+                val g = Color.green(p)
+                val b = Color.blue(p)
+
+                val isW = isWhite(r, g, b)
+                val isC = !isW && isColored(r, g, b)
+
+                if (!isW && !isC) continue
+
+                val cluster = mutableListOf<Int>()
+                val q = ArrayDeque<Int>()
+                q.add(idx)
+
+                while (q.isNotEmpty() && cluster.size < 1200) {
+                    val cur = q.removeFirst()
+                    if (cur !in pixels.indices || visited[cur]) continue
+
+                    val cx = cur % sw
+                    val cy = cur / sw
+
+                    if (cx < table.minX || cx > table.maxX || cy < table.minY || cy > table.maxY) {
+                        continue
+                    }
+
+                    val cp = pixels[cur]
+                    val cr = Color.red(cp)
+                    val cg = Color.green(cp)
+                    val cb = Color.blue(cp)
+
+                    val ok = if (isW) isWhite(cr, cg, cb) else isColored(cr, cg, cb)
+                    if (!ok) continue
+
+                    visited[cur] = true
+                    cluster.add(cur)
+
+                    if (cx + 1 < sw) q.add(cur + 1)
+                    if (cx - 1 >= 0) q.add(cur - 1)
+                    if (cy + 1 < sh) q.add(cur + sw)
+                    if (cy - 1 >= 0) q.add(cur - sw)
+                }
+
+                if (cluster.size < 4) continue
+
+                if (isW) {
+                    val ball = makeWhiteBall(cluster, sw, inv)
+                    if (ball != null && insideOriginalTable(ball, table, inv)) {
+                        whites.add(ball)
+                    }
+                } else {
+                    val ball = makeColoredBall(cluster, sw, inv)
+                    if (ball != null && insideOriginalTable(ball, table, inv)) {
+                        colors.add(ball)
+                    }
+                }
             }
-            if (cluster.size < 4) continue
-
-            val xs = cluster.map { it % sw }
-            val ys = cluster.map { it / sw }
-            val bx1=xs.min(); val bx2=xs.max()
-            val by1=ys.min(); val by2=ys.max()
-            val bw=bx2-bx1+1; val bh=by2-by1+1
-            if (bw<2||bh<2||bw>80||bh>80) continue
-            val ratio=bw.toFloat()/bh.toFloat().coerceAtLeast(1f)
-            if (ratio<0.35f||ratio>2.8f) continue
-
-            val cx=((bx1+bx2)/2f)*inv
-            val cy=((by1+by2)/2f)*inv
-            val rad=((bw+bh)/4f*inv).coerceIn(6f,36f)
-
-            if (isW) whites.add(Ball(cx,cy,rad))
-            else colors.add(Ball(cx,cy,rad))
         }
 
-        val cue = whites.maxByOrNull { it.r }
+        val cue = whites
+            .filter { it.r in 4f..28f }
+            .maxByOrNull { it.r }
+
         val deduped = mutableListOf<Ball>()
+
         for (b in colors.sortedByDescending { it.r }) {
-            if (deduped.none { hypot(b.x-it.x,b.y-it.y) < max(b.r,it.r)*1.2f }) deduped.add(b)
+            if (cue != null && hypot(b.x - cue.x, b.y - cue.y) < max(b.r, cue.r) * 1.3f) {
+                continue
+            }
+
+            if (deduped.none { hypot(b.x - it.x, b.y - it.y) < max(b.r, it.r) * 1.25f }) {
+                deduped.add(b)
+            }
         }
 
-        val sx1=minX*inv; val sx2=maxX*inv
-        val sy1=minY*inv; val sy2=maxY*inv; val mx=(sx1+sx2)/2f
+        val sx1 = table.minX * inv
+        val sx2 = table.maxX * inv
+        val sy1 = table.minY * inv
+        val sy2 = table.maxY * inv
+        val mx = (sx1 + sx2) / 2f
+
         val pockets = listOf(
-            Pocket(sx1+22f,sy1+22f), Pocket(mx,sy1+10f), Pocket(sx2-22f,sy1+22f),
-            Pocket(sx1+22f,sy2-22f), Pocket(mx,sy2-10f), Pocket(sx2-22f,sy2-22f)
+            Pocket(sx1 + 22f, sy1 + 22f),
+            Pocket(mx, sy1 + 10f),
+            Pocket(sx2 - 22f, sy1 + 22f),
+
+            Pocket(sx1 + 22f, sy2 - 22f),
+            Pocket(mx, sy2 - 10f),
+            Pocket(sx2 - 22f, sy2 - 22f)
         )
-        return Triple(cue, deduped.take(15), pockets)
+
+        val aimLine = detectAimLine(pixels, sw, sh, table, cue, inv)
+
+        return DetectionResult(
+            cue = cue,
+            balls = deduped.take(MAX_BALLS),
+            pockets = pockets,
+            aimLine = aimLine
+        )
     }
 
-    private fun isGreen(r: Int, g: Int, b: Int) = g > 55 && g > r+12 && g > b+12
-    private fun isWhite(r: Int, g: Int, b: Int): Boolean {
-        val mx=maxOf(r,g,b); val mn=minOf(r,g,b)
-        return mx>155 && mn>120 && abs(r-g)<50 && abs(g-b)<50 && abs(r-b)<55
+    private fun detectTableBox(pixels: IntArray, sw: Int, sh: Int): Box {
+        val visited = BooleanArray(pixels.size)
+
+        var best: Box? = null
+        var bestCount = 0
+
+        for (y in 0 until sh) {
+            for (x in 0 until sw) {
+                val idx = y * sw + x
+                if (visited[idx]) continue
+
+                val p = pixels[idx]
+                val r = Color.red(p)
+                val g = Color.green(p)
+                val b = Color.blue(p)
+
+                if (!isGreen(r, g, b)) {
+                    visited[idx] = true
+                    continue
+                }
+
+                var count = 0
+                var minX = x
+                var maxX = x
+                var minY = y
+                var maxY = y
+
+                val q = ArrayDeque<Int>()
+                q.add(idx)
+                visited[idx] = true
+
+                while (q.isNotEmpty()) {
+                    val cur = q.removeFirst()
+                    val cx = cur % sw
+                    val cy = cur / sw
+
+                    count++
+
+                    if (cx < minX) minX = cx
+                    if (cx > maxX) maxX = cx
+                    if (cy < minY) minY = cy
+                    if (cy > maxY) maxY = cy
+
+                    fun tryAdd(n: Int) {
+                        if (n !in pixels.indices || visited[n]) return
+
+                        val np = pixels[n]
+                        val nr = Color.red(np)
+                        val ng = Color.green(np)
+                        val nb = Color.blue(np)
+
+                        if (isGreen(nr, ng, nb)) {
+                            visited[n] = true
+                            q.add(n)
+                        }
+                    }
+
+                    if (cx + 1 < sw) tryAdd(cur + 1)
+                    if (cx - 1 >= 0) tryAdd(cur - 1)
+                    if (cy + 1 < sh) tryAdd(cur + sw)
+                    if (cy - 1 >= 0) tryAdd(cur - sw)
+                }
+
+                val bw = maxX - minX + 1
+                val bh = maxY - minY + 1
+
+                val looksLikeTable =
+                    count > 250 &&
+                            bw > sw * 0.20f &&
+                            bh > sh * 0.15f &&
+                            bw > bh
+
+                if (looksLikeTable && count > bestCount) {
+                    bestCount = count
+                    best = Box(minX, minY, maxX, maxY)
+                }
+            }
+        }
+
+        return best ?: Box(
+            minX = (sw * 0.18f).toInt(),
+            minY = (sh * 0.18f).toInt(),
+            maxX = (sw * 0.82f).toInt(),
+            maxY = (sh * 0.88f).toInt()
+        )
     }
+
+    private fun makeColoredBall(cluster: List<Int>, sw: Int, inv: Float): Ball? {
+        if (cluster.size < 5) return null
+
+        var minX = Int.MAX_VALUE
+        var maxX = Int.MIN_VALUE
+        var minY = Int.MAX_VALUE
+        var maxY = Int.MIN_VALUE
+        var sumX = 0f
+        var sumY = 0f
+
+        for (idx in cluster) {
+            val x = idx % sw
+            val y = idx / sw
+
+            if (x < minX) minX = x
+            if (x > maxX) maxX = x
+            if (y < minY) minY = y
+            if (y > maxY) maxY = y
+
+            sumX += x
+            sumY += y
+        }
+
+        val bw = maxX - minX + 1
+        val bh = maxY - minY + 1
+
+        if (bw < 2 || bh < 2 || bw > 40 || bh > 40) return null
+
+        val ratio = bw.toFloat() / bh.toFloat().coerceAtLeast(1f)
+        if (ratio < 0.45f || ratio > 2.2f) return null
+
+        val fill = cluster.size.toFloat() / (bw * bh).toFloat().coerceAtLeast(1f)
+        if (fill < 0.16f) return null
+
+        val cx = (sumX / cluster.size) * inv
+        val cy = (sumY / cluster.size) * inv
+        val rad = ((bw + bh) / 4f * inv).coerceIn(4f, 26f)
+
+        return Ball(cx, cy, rad)
+    }
+
+    private fun makeWhiteBall(cluster: List<Int>, sw: Int, inv: Float): Ball? {
+        if (cluster.size < 5) return null
+
+        var minX = Int.MAX_VALUE
+        var maxX = Int.MIN_VALUE
+        var minY = Int.MAX_VALUE
+        var maxY = Int.MIN_VALUE
+        var sumX = 0f
+        var sumY = 0f
+
+        for (idx in cluster) {
+            val x = idx % sw
+            val y = idx / sw
+
+            if (x < minX) minX = x
+            if (x > maxX) maxX = x
+            if (y < minY) minY = y
+            if (y > maxY) maxY = y
+
+            sumX += x
+            sumY += y
+        }
+
+        val bw = maxX - minX + 1
+        val bh = maxY - minY + 1
+        val ratio = bw.toFloat() / bh.toFloat().coerceAtLeast(1f)
+        val fill = cluster.size.toFloat() / (bw * bh).toFloat().coerceAtLeast(1f)
+
+        // Caso normal: componente redondo.
+        if (bw in 2..35 && bh in 2..35 && ratio in 0.50f..1.90f && fill > 0.20f) {
+            val cx = (sumX / cluster.size) * inv
+            val cy = (sumY / cluster.size) * inv
+            val rad = ((bw + bh) / 4f * inv).coerceIn(5f, 28f)
+            return Ball(cx, cy, rad)
+        }
+
+        // Caso especial: bola branca grudada na linha branca da mira.
+        // Aqui ele procura o ponto mais denso do componente para separar a bola da linha.
+        val searchR = 8
+        val searchR2 = searchR * searchR
+
+        var bestIdx = -1
+        var bestCount = 0
+
+        for (i in cluster.indices) {
+            val a = cluster[i]
+            val ax = a % sw
+            val ay = a / sw
+
+            var count = 0
+
+            for (j in cluster.indices) {
+                val c = cluster[j]
+                val cx = c % sw
+                val cy = c / sw
+
+                val dx = cx - ax
+                val dy = cy - ay
+
+                if (dx * dx + dy * dy <= searchR2) {
+                    count++
+                }
+            }
+
+            if (count > bestCount) {
+                bestCount = count
+                bestIdx = a
+            }
+        }
+
+        if (bestIdx < 0 || bestCount < 10) return null
+
+        val bx = bestIdx % sw
+        val by = bestIdx / sw
+
+        var localMinX = Int.MAX_VALUE
+        var localMaxX = Int.MIN_VALUE
+        var localMinY = Int.MAX_VALUE
+        var localMaxY = Int.MIN_VALUE
+        var localSumX = 0f
+        var localSumY = 0f
+        var localCount = 0
+
+        for (idx in cluster) {
+            val x = idx % sw
+            val y = idx / sw
+
+            val dx = x - bx
+            val dy = y - by
+
+            if (dx * dx + dy * dy <= searchR2) {
+                if (x < localMinX) localMinX = x
+                if (x > localMaxX) localMaxX = x
+                if (y < localMinY) localMinY = y
+                if (y > localMaxY) localMaxY = y
+
+                localSumX += x
+                localSumY += y
+                localCount++
+            }
+        }
+
+        if (localCount < 10) return null
+
+        val lw = localMaxX - localMinX + 1
+        val lh = localMaxY - localMinY + 1
+
+        if (lw < 2 || lh < 2 || lw > 30 || lh > 30) return null
+
+        val localRatio = lw.toFloat() / lh.toFloat().coerceAtLeast(1f)
+        if (localRatio < 0.45f || localRatio > 2.40f) return null
+
+        val cx = (localSumX / localCount) * inv
+        val cy = (localSumY / localCount) * inv
+        val rad = sqrt(localCount / 3.14159f) * inv
+
+        return Ball(cx, cy, rad.coerceIn(5f, 28f))
+    }
+
+    private fun detectAimLine(
+        pixels: IntArray,
+        sw: Int,
+        sh: Int,
+        table: Box,
+        cue: Ball?,
+        inv: Float
+    ): AimLine? {
+        if (cue == null) return null
+
+        val cx = cue.x * SCALE
+        val cy = cue.y * SCALE
+        val cr = cue.r * SCALE
+
+        val minDist = (cr + 5f).coerceAtLeast(7f)
+        val maxDist = (180f * SCALE).coerceAtLeast(60f)
+
+        val bins = 180
+        val scores = IntArray(bins)
+        val twoPi = (Math.PI * 2.0).toFloat()
+
+        val startX = (cx - maxDist).roundToInt().coerceAtLeast(table.minX)
+        val endX = (cx + maxDist).roundToInt().coerceAtMost(table.maxX)
+        val startY = (cy - maxDist).roundToInt().coerceAtLeast(table.minY)
+        val endY = (cy + maxDist).roundToInt().coerceAtMost(table.maxY)
+
+        for (y in startY..endY) {
+            for (x in startX..endX) {
+                val dx = x - cx
+                val dy = y - cy
+                val d2 = dx * dx + dy * dy
+
+                if (d2 < minDist * minDist || d2 > maxDist * maxDist) continue
+
+                val idx = y * sw + x
+                if (idx !in pixels.indices) continue
+
+                val p = pixels[idx]
+                val r = Color.red(p)
+                val g = Color.green(p)
+                val b = Color.blue(p)
+
+                if (!isAimPixel(r, g, b)) continue
+
+                var ang = atan2(dy.toDouble(), dx.toDouble()).toFloat()
+                if (ang < 0f) ang += twoPi
+
+                val bin = ((ang / twoPi) * bins).toInt().coerceIn(0, bins - 1)
+
+                val distBonus = sqrt(d2).toInt() / 8
+                scores[bin] += 1 + distBonus
+            }
+        }
+
+        val bestBin = scores.indices.maxByOrNull { scores[it] } ?: return null
+
+        if (scores[bestBin] < 10) return null
+
+        val angle = ((bestBin + 0.5f) / bins.toFloat()) * twoPi
+        val dirX = cos(angle.toDouble()).toFloat()
+        val dirY = sin(angle.toDouble()).toFloat()
+
+        // Confirma se existe uma linha contínua nessa direção.
+        var hits = 0
+        var farthest = 0f
+        var t = minDist
+
+        while (t <= maxDist) {
+            var found = false
+
+            for (off in -2..2) {
+                val px = (cx + dirX * t - dirY * off).roundToInt()
+                val py = (cy + dirY * t + dirX * off).roundToInt()
+
+                if (px !in 0 until sw || py !in 0 until sh) continue
+                if (px < table.minX || px > table.maxX || py < table.minY || py > table.maxY) continue
+
+                val idx = py * sw + px
+                val p = pixels[idx]
+                val r = Color.red(p)
+                val g = Color.green(p)
+                val b = Color.blue(p)
+
+                if (isAimPixel(r, g, b)) {
+                    found = true
+                    break
+                }
+            }
+
+            if (found) {
+                hits++
+                farthest = t
+            }
+
+            t += 1.5f
+        }
+
+        if (hits < 6 || farthest < minDist + 12f) return null
+
+        val left = table.minX * inv
+        val top = table.minY * inv
+        val right = table.maxX * inv
+        val bottom = table.maxY * inv
+
+        val endDistance = rayToBoxDistance(
+            x = cue.x,
+            y = cue.y,
+            dx = dirX,
+            dy = dirY,
+            left = left,
+            top = top,
+            right = right,
+            bottom = bottom
+        )
+
+        if (endDistance <= 0f) return null
+
+        return AimLine(
+            x1 = cue.x,
+            y1 = cue.y,
+            x2 = cue.x + dirX * endDistance,
+            y2 = cue.y + dirY * endDistance
+        )
+    }
+
+    private fun rayToBoxDistance(
+        x: Float,
+        y: Float,
+        dx: Float,
+        dy: Float,
+        left: Float,
+        top: Float,
+        right: Float,
+        bottom: Float
+    ): Float {
+        var best = Float.MAX_VALUE
+
+        fun check(t: Float) {
+            if (t <= 0f) return
+
+            val hx = x + dx * t
+            val hy = y + dy * t
+
+            if (hx >= left && hx <= right && hy >= top && hy <= bottom) {
+                if (t < best) best = t
+            }
+        }
+
+        if (abs(dx) > 0.0001f) {
+            check((left - x) / dx)
+            check((right - x) / dx)
+        }
+
+        if (abs(dy) > 0.0001f) {
+            check((top - y) / dy)
+            check((bottom - y) / dy)
+        }
+
+        return if (best == Float.MAX_VALUE) -1f else best
+    }
+
+    private fun insideOriginalTable(ball: Ball, table: Box, inv: Float): Boolean {
+        val left = table.minX * inv
+        val top = table.minY * inv
+        val right = table.maxX * inv
+        val bottom = table.maxY * inv
+
+        return ball.x in left..right && ball.y in top..bottom
+    }
+
+    private fun isGreen(r: Int, g: Int, b: Int): Boolean {
+        return g > 45 &&
+                g > r + 8 &&
+                g > b + 8
+    }
+
+    private fun isWhite(r: Int, g: Int, b: Int): Boolean {
+        val mx = maxOf(r, g, b)
+        val mn = minOf(r, g, b)
+        val diff = mx - mn
+
+        val lum = 0.2126f * r + 0.7152f * g + 0.0722f * b
+        val sat = if (mx == 0) 0f else diff / mx.toFloat()
+
+        return lum > 130f &&
+                mn > 85 &&
+                sat < 0.34f &&
+                diff < 85 &&
+                !isGreen(r, g, b)
+    }
+
     private fun isColored(r: Int, g: Int, b: Int): Boolean {
-        if (isGreen(r,g,b)||isWhite(r,g,b)) return false
-        val mx=maxOf(r,g,b); val mn=minOf(r,g,b)
-        val sat=if(mx>0)(mx-mn).toFloat()/mx else 0f
-        return (sat>0.18f&&mx>50)||(mx<80&&mn<55)
+        if (isGreen(r, g, b) || isWhite(r, g, b)) return false
+
+        val mx = maxOf(r, g, b)
+        val mn = minOf(r, g, b)
+        val diff = mx - mn
+
+        val lum = 0.2126f * r + 0.7152f * g + 0.0722f * b
+        val sat = if (mx == 0) 0f else diff / mx.toFloat()
+
+        return mx > 35 &&
+                lum > 20f &&
+                (
+                        sat > 0.14f ||
+                                mx < 95 && mn < 70
+                        )
+    }
+
+    private fun isAimPixel(r: Int, g: Int, b: Int): Boolean {
+        if (isGreen(r, g, b)) return false
+
+        val mx = maxOf(r, g, b)
+        val mn = minOf(r, g, b)
+        val diff = mx - mn
+
+        val lum = 0.2126f * r + 0.7152f * g + 0.0722f * b
+        val sat = if (mx == 0) 0f else diff / mx.toFloat()
+
+        val whiteLine =
+            lum > 135f &&
+                    mn > 95 &&
+                    sat < 0.38f
+
+        val blueLine =
+            b > 100 &&
+                    b > r + 20 &&
+                    b > g + 5
+
+        return whiteLine || blueLine
     }
 }
