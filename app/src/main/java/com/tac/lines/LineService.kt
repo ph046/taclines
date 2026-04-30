@@ -41,17 +41,21 @@ class LineService : Service() {
 
     private var autoScan = false
     private var processing = false
+    private var calibrating = false
     private var lastStatusTime = 0L
 
-    private val scanDelayMs = 110L
+    private val scanDelayMs = 140L
 
     private var statusView: TextView? = null
     private var scanButton: Button? = null
+    private var aiButton: Button? = null
     private var aimButton: Button? = null
 
     private var latestShot: AutoAimShot? = null
     private var latestCue: Ball? = null
     private var latestBallCount = 0
+
+    private var aiCalibration: AiCalibration? = null
 
     private val projCb = object : MediaProjection.Callback() {
         override fun onStop() {
@@ -170,7 +174,7 @@ class LineService : Service() {
     private fun addPanel() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.argb(220, 8, 8, 8))
+            setBackgroundColor(Color.argb(225, 8, 8, 8))
             setPadding(14, 14, 14, 14)
         }
 
@@ -182,27 +186,42 @@ class LineService : Service() {
                 android.content.res.ColorStateList.valueOf(Color.argb(255, 0, 210, 80))
         }
 
+        val btnAi = Button(this).apply {
+            text = "🧠 CALIBRAR IA"
+            setTextColor(Color.BLACK)
+            textSize = 13f
+            backgroundTintList =
+                android.content.res.ColorStateList.valueOf(Color.argb(255, 180, 120, 255))
+        }
+
         val btnAim = Button(this).apply {
             text = "🎯 AUTO AIM"
             setTextColor(Color.BLACK)
             textSize = 13f
+            isEnabled = false
             backgroundTintList =
-                android.content.res.ColorStateList.valueOf(Color.argb(255, 0, 190, 255))
+                android.content.res.ColorStateList.valueOf(Color.argb(255, 100, 100, 100))
         }
 
         val tvStatus = TextView(this).apply {
-            text = "SCAN desligado"
+            text = "IA=OFF | SCAN desligado"
             setTextColor(Color.GRAY)
             textSize = 10f
             gravity = Gravity.CENTER
         }
 
         scanButton = btnScan
+        aiButton = btnAi
         aimButton = btnAim
         statusView = tvStatus
 
         root.addView(
             btnScan,
+            LinearLayout.LayoutParams(-1, -2).also { it.bottomMargin = 6 }
+        )
+
+        root.addView(
+            btnAi,
             LinearLayout.LayoutParams(-1, -2).also { it.bottomMargin = 6 }
         )
 
@@ -217,7 +236,7 @@ class LineService : Service() {
         )
 
         val lp = WindowManager.LayoutParams(
-            250,
+            270,
             WindowManager.LayoutParams.WRAP_CONTENT,
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
@@ -273,6 +292,10 @@ class LineService : Service() {
             true
         }
 
+        btnAi.setOnClickListener {
+            calibrateWithAi()
+        }
+
         btnAim.setOnClickListener {
             performAutoAim()
         }
@@ -303,7 +326,12 @@ class LineService : Service() {
             scanButton?.backgroundTintList =
                 android.content.res.ColorStateList.valueOf(Color.argb(255, 0, 210, 80))
 
-            statusView?.text = "SCAN desligado"
+            statusView?.text = if (aiCalibration?.isUsable() == true) {
+                "IA=OK | SCAN desligado"
+            } else {
+                "IA=OFF | SCAN desligado"
+            }
+
             statusView?.setTextColor(Color.GRAY)
 
             main.removeCallbacks(scanLoop)
@@ -312,21 +340,106 @@ class LineService : Service() {
             latestCue = null
             latestBallCount = 0
 
+            updateAimButton(false)
+
             overlay?.update(emptyList(), emptyList(), null, null, null)
+        }
+    }
+
+    private fun calibrateWithAi() {
+        if (calibrating) return
+
+        val img = reader?.acquireLatestImage()
+        if (img == null) {
+            statusView?.text = "IA: sem imagem"
+            statusView?.setTextColor(Color.RED)
+            return
+        }
+
+        calibrating = true
+
+        statusView?.text = "IA calibrando..."
+        statusView?.setTextColor(Color.YELLOW)
+
+        val finalBmp = try {
+            imageToBitmap(img)
+        } catch (e: Exception) {
+            e.printStackTrace()
+            null
+        } finally {
+            try {
+                img.close()
+            } catch (_: Exception) {
+            }
+        }
+
+        if (finalBmp == null) {
+            calibrating = false
+            statusView?.text = "IA: erro imagem"
+            statusView?.setTextColor(Color.RED)
+            return
+        }
+
+        bg.post {
+            try {
+                val calibration = CalibrationClient.calibrate(finalBmp)
+
+                if (!finalBmp.isRecycled) {
+                    finalBmp.recycle()
+                }
+
+                aiCalibration = calibration
+
+                val usable = calibration.isUsable()
+
+                main.post {
+                    calibrating = false
+
+                    if (usable) {
+                        statusView?.text =
+                            "IA=OK ${(calibration.confidence * 100f).toInt()}% | bolas=${calibration.balls.size}"
+                        statusView?.setTextColor(Color.GREEN)
+
+                        updateAimButton(latestShot != null)
+                    } else {
+                        statusView?.text =
+                            "IA=OFF | ${calibration.message.ifBlank { "calibração fraca" }}"
+                        statusView?.setTextColor(Color.RED)
+
+                        updateAimButton(false)
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+
+                try {
+                    if (!finalBmp.isRecycled) {
+                        finalBmp.recycle()
+                    }
+                } catch (_: Exception) {
+                }
+
+                main.post {
+                    calibrating = false
+                    aiCalibration = null
+                    updateAimButton(false)
+
+                    statusView?.text = "IA erro: backend"
+                    statusView?.setTextColor(Color.RED)
+                }
+            }
         }
     }
 
     private fun scanFrame(forceStatus: Boolean = false) {
         if (processing) return
 
-        val tv = statusView
-
         val img = reader?.acquireLatestImage()
         if (img == null) {
             if (forceStatus) {
                 main.post {
-                    tv?.text = "Sem imagem"
-                    tv?.setTextColor(Color.RED)
+                    statusView?.text = "Sem imagem"
+                    statusView?.setTextColor(Color.RED)
                 }
             }
             return
@@ -334,109 +447,143 @@ class LineService : Service() {
 
         processing = true
 
-        try {
-            val plane = img.planes[0]
-            val bw = plane.rowStride / plane.pixelStride
-
-            val bmp = Bitmap.createBitmap(bw, img.height, Bitmap.Config.ARGB_8888)
-            bmp.copyPixelsFromBuffer(plane.buffer)
-
-            val finalBmp = if (bw != img.width) {
-                Bitmap.createBitmap(bmp, 0, 0, img.width, img.height).also {
-                    bmp.recycle()
-                }
-            } else {
-                bmp
-            }
-
-            bg.post {
-                try {
-                    val result = Detector.analyzeFull(finalBmp)
-
-                    if (!finalBmp.isRecycled) {
-                        finalBmp.recycle()
-                    }
-
-                    val cue = result.cue
-                    val balls = result.balls
-                    val pockets = result.pockets
-                    val rayLine = result.aimLine
-
-                    val shot = AutoAimEngine.findBestShot(
-                        cue = cue,
-                        balls = balls,
-                        pockets = pockets
-                    )
-
-                    latestShot = shot
-                    latestCue = cue
-                    latestBallCount = balls.size
-
-                    overlay?.update(
-                        lines = emptyList(),
-                        pockets = emptyList(),
-                        cue = cue,
-                        rayLine = rayLine,
-                        autoShot = shot
-                    )
-
-                    val rayStatus = if (rayLine != null) "mira=OK" else "mira=OFF"
-                    val cueStatus = if (cue != null) "branca=OK" else "branca=OFF"
-                    val shotStatus = if (shot != null) {
-                        "shot=${(shot.confidence * 100f).toInt()}%"
-                    } else {
-                        "shot=OFF"
-                    }
-
-                    postStatusLimited(
-                        text = "$rayStatus | $cueStatus | bolas=${balls.size} | $shotStatus",
-                        color = when {
-                            shot != null -> Color.GREEN
-                            cue != null -> Color.YELLOW
-                            else -> Color.RED
-                        },
-                        force = forceStatus
-                    )
-
-                    processing = false
-                } catch (e: Exception) {
-                    e.printStackTrace()
-
-                    try {
-                        if (!finalBmp.isRecycled) {
-                            finalBmp.recycle()
-                        }
-                    } catch (_: Exception) {
-                    }
-
-                    latestShot = null
-                    latestCue = null
-                    latestBallCount = 0
-
-                    overlay?.update(emptyList(), emptyList(), null, null, null)
-
-                    postStatusLimited(
-                        text = "Erro scan",
-                        color = Color.RED,
-                        force = true
-                    )
-
-                    processing = false
-                }
-            }
+        val finalBmp = try {
+            imageToBitmap(img)
+        } catch (e: Exception) {
+            e.printStackTrace()
+            null
         } finally {
             try {
                 img.close()
             } catch (_: Exception) {
             }
         }
+
+        if (finalBmp == null) {
+            processing = false
+            postStatusLimited(
+                text = "Erro imagem",
+                color = Color.RED,
+                force = true
+            )
+            return
+        }
+
+        bg.post {
+            try {
+                val detectorResult = Detector.analyzeFull(finalBmp)
+
+                if (!finalBmp.isRecycled) {
+                    finalBmp.recycle()
+                }
+
+                val ai = aiCalibration
+
+                val usingAi = ai?.isUsable() == true
+
+                val cue: Ball?
+                val balls: List<Ball>
+                val pockets: List<Pocket>
+
+                if (usingAi && ai != null) {
+                    cue = ai.cueAsBall()
+                    balls = ai.ballsAsList()
+                    pockets = ai.pocketsAsList()
+                } else {
+                    cue = detectorResult.cue
+                    balls = detectorResult.balls
+                    pockets = detectorResult.pockets
+                }
+
+                val rayLine = detectorResult.aimLine
+
+                val shot = if (usingAi) {
+                    AutoAimEngine.findBestShot(
+                        cue = cue,
+                        balls = balls,
+                        pockets = pockets
+                    )
+                } else {
+                    null
+                }
+
+                latestShot = shot
+                latestCue = cue
+                latestBallCount = balls.size
+
+                overlay?.update(
+                    lines = emptyList(),
+                    pockets = emptyList(),
+                    cue = cue,
+                    rayLine = rayLine,
+                    autoShot = shot
+                )
+
+                val aiStatus = if (usingAi) "IA=OK" else "IA=OFF"
+                val rayStatus = if (rayLine != null) "mira=OK" else "mira=OFF"
+                val cueStatus = if (cue != null) "branca=OK" else "branca=OFF"
+                val shotStatus = if (shot != null) {
+                    "shot=${(shot.confidence * 100f).toInt()}%"
+                } else {
+                    "shot=OFF"
+                }
+
+                updateAimButton(usingAi && shot != null)
+
+                postStatusLimited(
+                    text = "$aiStatus | $rayStatus | $cueStatus | bolas=${balls.size} | $shotStatus",
+                    color = when {
+                        usingAi && shot != null -> Color.GREEN
+                        usingAi -> Color.YELLOW
+                        cue != null -> Color.YELLOW
+                        else -> Color.RED
+                    },
+                    force = forceStatus
+                )
+
+                processing = false
+            } catch (e: Exception) {
+                e.printStackTrace()
+
+                try {
+                    if (!finalBmp.isRecycled) {
+                        finalBmp.recycle()
+                    }
+                } catch (_: Exception) {
+                }
+
+                latestShot = null
+                latestCue = null
+                latestBallCount = 0
+
+                updateAimButton(false)
+
+                overlay?.update(emptyList(), emptyList(), null, null, null)
+
+                postStatusLimited(
+                    text = "Erro scan",
+                    color = Color.RED,
+                    force = true
+                )
+
+                processing = false
+            }
+        }
     }
 
     private fun performAutoAim() {
+        val aiOk = aiCalibration?.isUsable() == true
+
+        if (!aiOk) {
+            statusView?.text = "AUTO bloqueado: calibre IA"
+            statusView?.setTextColor(Color.RED)
+            return
+        }
+
         val shot = latestShot
 
         if (shot == null) {
-            statusView?.text = "Sem jogada calculada"
+            statusView?.text = "Sem jogada IA"
             statusView?.setTextColor(Color.RED)
             return
         }
@@ -464,6 +611,36 @@ class LineService : Service() {
         }
     }
 
+    private fun imageToBitmap(img: android.media.Image): Bitmap {
+        val plane = img.planes[0]
+        val bw = plane.rowStride / plane.pixelStride
+
+        val bmp = Bitmap.createBitmap(bw, img.height, Bitmap.Config.ARGB_8888)
+        bmp.copyPixelsFromBuffer(plane.buffer)
+
+        return if (bw != img.width) {
+            Bitmap.createBitmap(bmp, 0, 0, img.width, img.height).also {
+                bmp.recycle()
+            }
+        } else {
+            bmp
+        }
+    }
+
+    private fun updateAimButton(enabled: Boolean) {
+        main.post {
+            aimButton?.isEnabled = enabled
+            aimButton?.backgroundTintList =
+                android.content.res.ColorStateList.valueOf(
+                    if (enabled) {
+                        Color.argb(255, 0, 190, 255)
+                    } else {
+                        Color.argb(255, 100, 100, 100)
+                    }
+                )
+        }
+    }
+
     private fun postStatusLimited(text: String, color: Int, force: Boolean = false) {
         val now = SystemClock.uptimeMillis()
 
@@ -482,6 +659,7 @@ class LineService : Service() {
     private fun cleanup() {
         autoScan = false
         processing = false
+        calibrating = false
         main.removeCallbacks(scanLoop)
 
         try {
@@ -500,6 +678,7 @@ class LineService : Service() {
     override fun onDestroy() {
         autoScan = false
         processing = false
+        calibrating = false
 
         main.removeCallbacksAndMessages(null)
 
