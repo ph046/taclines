@@ -22,6 +22,11 @@ class OverlayView(context: Context) : View(context) {
         strokeCap = Paint.Cap.ROUND
     }
 
+    private val rayStartPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.argb(230, 0, 255, 255)
+        style = Paint.Style.FILL
+    }
+
     private val rayEndPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.argb(255, 0, 255, 255)
         style = Paint.Style.FILL
@@ -31,7 +36,7 @@ class OverlayView(context: Context) : View(context) {
         setWillNotDraw(false)
     }
 
-    // Mantém compatibilidade com chamadas antigas
+    // Compatibilidade com chamadas antigas
     fun update(lines: List<AimLine>, pockets: List<Pocket>, cue: Ball?) {
         update(lines, pockets, cue, null)
     }
@@ -48,6 +53,9 @@ class OverlayView(context: Context) : View(context) {
         rayLine?.let { ray ->
             canvas.drawLine(ray.x1, ray.y1, ray.x2, ray.y2, rayGlowPaint)
             canvas.drawLine(ray.x1, ray.y1, ray.x2, ray.y2, rayPaint)
+
+            // Bolinha pequena no começo e no fim pra você ver se está saindo da branca certo
+            canvas.drawCircle(ray.x1, ray.y1, 5f, rayStartPaint)
             canvas.drawCircle(ray.x2, ray.y2, 8f, rayEndPaint)
         }
     }
