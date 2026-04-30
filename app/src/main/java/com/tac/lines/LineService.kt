@@ -43,7 +43,6 @@ class LineService : Service() {
     private var processing = false
     private var lastStatusTime = 0L
 
-    // Quanto menor, mais rápido. 70~120ms é uma boa faixa.
     private val scanDelayMs = 85L
 
     private var statusView: TextView? = null
