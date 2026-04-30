@@ -31,10 +31,12 @@ class OverlayView(context: Context) : View(context) {
         setWillNotDraw(false)
     }
 
+    // Mantém compatibilidade com chamadas antigas
     fun update(lines: List<AimLine>, pockets: List<Pocket>, cue: Ball?) {
         update(lines, pockets, cue, null)
     }
 
+    // Agora só desenha a linha azul da mira
     fun update(lines: List<AimLine>, pockets: List<Pocket>, cue: Ball?, rayLine: RayLine?) {
         this.rayLine = rayLine
         postInvalidateOnAnimation()
