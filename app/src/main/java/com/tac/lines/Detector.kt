@@ -15,9 +15,12 @@ import kotlin.math.sqrt
 data class Ball(val x: Float, val y: Float, val r: Float)
 data class Pocket(val x: Float, val y: Float)
 
-// Linha nova da mira pequena esticada até o final da mesa.
-// Não chamei de AimLine para não bater com a AimLine antiga do LineCalc.
-data class RayLine(val x1: Float, val y1: Float, val x2: Float, val y2: Float)
+data class RayLine(
+    val x1: Float,
+    val y1: Float,
+    val x2: Float,
+    val y2: Float
+)
 
 data class DetectionResult(
     val cue: Ball?,
@@ -28,8 +31,6 @@ data class DetectionResult(
 
 object Detector {
 
-    // 0.18 deixava a bola branca pequena demais.
-    // 0.50 é mais pesado, mas bem mais certeiro.
     private const val SCALE = 0.50f
     private const val MAX_BALLS = 15
 
@@ -40,13 +41,11 @@ object Detector {
         val maxY: Int
     )
 
-    // Mantém compatibilidade com o código antigo.
     fun analyze(bmp: Bitmap): Triple<Ball?, List<Ball>, List<Pocket>> {
         val result = analyzeFull(bmp)
         return Triple(result.cue, result.balls, result.pockets)
     }
 
-    // Novo método: detecta branca, bolas, caçapas e a linha da mira esticada.
     fun analyzeFull(bmp: Bitmap): DetectionResult {
         val sw = (bmp.width * SCALE).toInt().coerceAtLeast(1)
         val sh = (bmp.height * SCALE).toInt().coerceAtLeast(1)
@@ -83,7 +82,7 @@ object Detector {
                 val q = ArrayDeque<Int>()
                 q.add(idx)
 
-                while (!q.isEmpty && cluster.size < 1200) {
+                while (!q.isEmpty() && cluster.size < 1200) {
                     val cur = q.removeFirst()
                     if (cur !in pixels.indices || visited[cur]) continue
 
@@ -162,7 +161,6 @@ object Detector {
             Pocket(sx1 + 22f, sy1 + 22f),
             Pocket(mx, sy1 + 10f),
             Pocket(sx2 - 22f, sy1 + 22f),
-
             Pocket(sx1 + 22f, sy2 - 22f),
             Pocket(mx, sy2 - 10f),
             Pocket(sx2 - 22f, sy2 - 22f)
@@ -216,7 +214,7 @@ object Detector {
                 q.add(idx)
                 visited[idx] = true
 
-                while (!q.isEmpty) {
+                while (!q.isEmpty()) {
                     val cur = q.removeFirst()
                     val cx = cur % sw
                     val cy = cur / sw
@@ -341,7 +339,6 @@ object Detector {
         val ratio = bw.toFloat() / bh.toFloat().coerceAtLeast(1f)
         val fill = cluster.size.toFloat() / (bw * bh).toFloat().coerceAtLeast(1f)
 
-        // Caso normal: componente redondo da bola.
         if (bw in 2..35 && bh in 2..35 && ratio in 0.50f..1.90f && fill > 0.20f) {
             val cx = (sumX / cluster.size) * inv
             val cy = (sumY / cluster.size) * inv
@@ -349,8 +346,6 @@ object Detector {
             return Ball(cx, cy, rad)
         }
 
-        // Caso especial: bola branca grudada na linha branca da mira.
-        // Ele procura o ponto mais denso do componente para separar bola da linha.
         val searchR = 8
         val searchR2 = searchR * searchR
 
@@ -427,7 +422,7 @@ object Detector {
 
         val cx = (localSumX / localCount) * inv
         val cy = (localSumY / localCount) * inv
-        val rad = sqrt(localCount / 3.14159f) * inv
+        val rad = sqrt(localCount / Math.PI).toFloat() * inv
 
         return Ball(cx, cy, rad.coerceIn(5f, 28f))
     }
@@ -480,7 +475,7 @@ object Detector {
                 if (ang < 0f) ang += twoPi
 
                 val bin = ((ang / twoPi) * bins).toInt().coerceIn(0, bins - 1)
-                val distBonus = sqrt(d2).toInt() / 8
+                val distBonus = sqrt(d2.toDouble()).toInt() / 8
 
                 scores[bin] += 1 + distBonus
             }
@@ -493,7 +488,6 @@ object Detector {
         val dirX = cos(angle.toDouble()).toFloat()
         val dirY = sin(angle.toDouble()).toFloat()
 
-        // Confirma se existe uma linha contínua nessa direção.
         var hits = 0
         var farthest = 0f
         var t = minDist
