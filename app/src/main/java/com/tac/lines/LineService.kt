@@ -41,24 +41,16 @@ class LineService : Service() {
 
     private var autoScan = false
     private var processing = false
-    private var planning = false
+    private var aiPlaying = false
     private var lastStatusTime = 0L
 
-    private val scanDelayMs = 300L
+    private val scanDelayMs = 350L
+    private val maxAiSteps = 5
 
     private var statusView: TextView? = null
     private var scanButton: Button? = null
     private var aiButton: Button? = null
-    private var aimButton: Button? = null
-
-    private var latestShot: AutoAimShot? = null
-    private var latestShotTime = 0L
-    private var latestPlanMessage = ""
-
-    private var latestCue: Ball? = null
-    private var latestBallCount = 0
-
-    private val shotExpireMs = 30000L
+    private var stopButton: Button? = null
 
     private val projCb = object : MediaProjection.Callback() {
         override fun onStop() {
@@ -197,8 +189,8 @@ class LineService : Service() {
                 android.content.res.ColorStateList.valueOf(Color.argb(255, 180, 120, 255))
         }
 
-        val btnAim = Button(this).apply {
-            text = "🎯 AUTO AIM"
+        val btnStop = Button(this).apply {
+            text = "■ PARAR IA"
             setTextColor(Color.BLACK)
             textSize = 13f
             isEnabled = false
@@ -215,7 +207,7 @@ class LineService : Service() {
 
         scanButton = btnScan
         aiButton = btnAi
-        aimButton = btnAim
+        stopButton = btnStop
         statusView = tvStatus
 
         root.addView(
@@ -229,7 +221,7 @@ class LineService : Service() {
         )
 
         root.addView(
-            btnAim,
+            btnStop,
             LinearLayout.LayoutParams(-1, -2).also { it.bottomMargin = 6 }
         )
 
@@ -296,11 +288,11 @@ class LineService : Service() {
         }
 
         btnAi.setOnClickListener {
-            planShotWithAi()
+            startAiPlay()
         }
 
-        btnAim.setOnClickListener {
-            performAutoAim()
+        btnStop.setOnClickListener {
+            stopAiPlay("IA parada")
         }
 
         try {
@@ -329,39 +321,74 @@ class LineService : Service() {
             scanButton?.backgroundTintList =
                 android.content.res.ColorStateList.valueOf(Color.argb(255, 0, 210, 80))
 
-            statusView?.text = if (latestShot != null && !isShotExpired()) {
-                "Plano IA pronto | AUTO liberado"
-            } else {
-                "SCAN desligado | aperte IA JOGAR"
-            }
-
+            statusView?.text = "SCAN desligado | aperte IA JOGAR"
             statusView?.setTextColor(Color.GRAY)
+
             main.removeCallbacks(scanLoop)
+            overlay?.update(emptyList(), emptyList(), null, null, null)
         }
     }
 
-    private fun planShotWithAi() {
-        if (planning) return
+    private fun startAiPlay() {
+        if (aiPlaying) return
 
-        val img = reader?.acquireLatestImage()
-        if (img == null) {
-            statusView?.text = "IA: sem imagem"
+        if (!AutoAimAccessibilityService.isRunning()) {
+            statusView?.text = "Acessibilidade OFF"
             statusView?.setTextColor(Color.RED)
             return
         }
 
-        planning = true
-        updateAiButton(false)
-        updateAimButton(false)
+        aiPlaying = true
+        autoScan = false
+        main.removeCallbacks(scanLoop)
 
-        latestShot = null
-        latestShotTime = 0L
-        latestPlanMessage = ""
+        scanButton?.text = "▶ SCAN"
+        scanButton?.backgroundTintList =
+            android.content.res.ColorStateList.valueOf(Color.argb(255, 0, 210, 80))
+
+        updateAiButton(false)
+        updateStopButton(true)
 
         overlay?.update(emptyList(), emptyList(), null, null, null)
 
-        statusView?.text = "IA pensando..."
+        statusView?.text = "IA jogando..."
         statusView?.setTextColor(Color.YELLOW)
+
+        main.postDelayed({
+            runAiStep(0)
+        }, 350L)
+    }
+
+    private fun stopAiPlay(message: String) {
+        aiPlaying = false
+        updateAiButton(true)
+        updateStopButton(false)
+
+        statusView?.text = message
+        statusView?.setTextColor(Color.GRAY)
+    }
+
+    private fun runAiStep(stepIndex: Int) {
+        if (!aiPlaying) return
+
+        if (stepIndex >= maxAiSteps) {
+            stopAiPlay("IA parou: limite de passos")
+            return
+        }
+
+        if (AutoAimAccessibilityService.isBusy()) {
+            main.postDelayed({
+                runAiStep(stepIndex)
+            }, 300L)
+            return
+        }
+
+        val img = reader?.acquireLatestImage()
+        if (img == null) {
+            stopAiPlay("IA: sem imagem")
+            statusView?.setTextColor(Color.RED)
+            return
+        }
 
         val finalBmp = try {
             imageToBitmap(img)
@@ -376,58 +403,28 @@ class LineService : Service() {
         }
 
         if (finalBmp == null) {
-            planning = false
-            updateAiButton(true)
-
-            statusView?.text = "IA: erro imagem"
+            stopAiPlay("IA: erro imagem")
             statusView?.setTextColor(Color.RED)
             return
         }
 
+        statusView?.text = "IA vendo tela ${stepIndex + 1}/$maxAiSteps..."
+        statusView?.setTextColor(Color.YELLOW)
+
         bg.post {
             try {
-                val plan = ShotPlannerClient.planShot(finalBmp)
+                val step = AiPlayerClient.playStep(
+                    bitmap = finalBmp,
+                    stepIndex = stepIndex,
+                    maxSteps = maxAiSteps
+                )
 
                 if (!finalBmp.isRecycled) {
                     finalBmp.recycle()
                 }
 
-                val shot = plan.toAutoAimShot()
-
                 main.post {
-                    planning = false
-                    updateAiButton(true)
-
-                    if (plan.isUsable() && shot != null) {
-                        latestShot = shot
-                        latestShotTime = SystemClock.uptimeMillis()
-                        latestPlanMessage = plan.message
-
-                        overlay?.update(
-                            lines = emptyList(),
-                            pockets = emptyList(),
-                            cue = null,
-                            rayLine = null,
-                            autoShot = shot
-                        )
-
-                        updateAimButton(true)
-
-                        statusView?.text =
-                            "IA JOGADA ${(plan.confidence * 100f).toInt()}% | ${plan.message.take(45)}"
-                        statusView?.setTextColor(Color.GREEN)
-                    } else {
-                        latestShot = null
-                        latestShotTime = 0L
-                        latestPlanMessage = plan.message
-
-                        overlay?.update(emptyList(), emptyList(), null, null, null)
-                        updateAimButton(false)
-
-                        statusView?.text =
-                            "IA sem jogada | ${plan.message.ifBlank { "tente outra posição" }.take(60)}"
-                        statusView?.setTextColor(Color.RED)
-                    }
+                    handleAiStep(step, stepIndex)
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -440,25 +437,88 @@ class LineService : Service() {
                 }
 
                 main.post {
-                    planning = false
-                    updateAiButton(true)
-
-                    latestShot = null
-                    latestShotTime = 0L
-                    latestPlanMessage = ""
-
-                    overlay?.update(emptyList(), emptyList(), null, null, null)
-                    updateAimButton(false)
-
-                    statusView?.text = "IA erro: ${e.message ?: "backend"}"
+                    stopAiPlay("IA erro: ${e.message ?: "backend"}")
                     statusView?.setTextColor(Color.RED)
                 }
             }
         }
     }
 
+    private fun handleAiStep(step: AiPlayStep, stepIndex: Int) {
+        if (!aiPlaying) return
+
+        val msg = step.message.ifBlank { step.action }
+
+        if (step.isStopAction()) {
+            stopAiPlay("IA parou: ${msg.take(55)}")
+            statusView?.setTextColor(Color.RED)
+            return
+        }
+
+        if (!step.ok || !step.isUsable()) {
+            stopAiPlay("IA falhou: ${msg.take(55)}")
+            statusView?.setTextColor(Color.RED)
+            return
+        }
+
+        val gesture = step.gesture
+
+        if (gesture == null) {
+            stopAiPlay("IA sem gesto")
+            statusView?.setTextColor(Color.RED)
+            return
+        }
+
+        val ok = AutoAimAccessibilityService.drag(
+            fromX = gesture.fromX,
+            fromY = gesture.fromY,
+            toX = gesture.toX,
+            toY = gesture.toY,
+            durationMs = gesture.durationMs
+        )
+
+        if (!ok) {
+            stopAiPlay("Falha ao executar gesto")
+            statusView?.setTextColor(Color.RED)
+            return
+        }
+
+        when {
+            step.isShootAction() -> {
+                statusView?.text =
+                    "IA bateu ${(step.confidence * 100f).toInt()}% | ${msg.take(45)}"
+                statusView?.setTextColor(Color.GREEN)
+
+                main.postDelayed({
+                    stopAiPlay("IA finalizou")
+                }, gesture.durationMs + 1200L)
+            }
+
+            step.isDragAction() -> {
+                statusView?.text =
+                    "IA ajustando ${(step.confidence * 100f).toInt()}% | ${msg.take(45)}"
+                statusView?.setTextColor(Color.YELLOW)
+
+                main.postDelayed({
+                    runAiStep(stepIndex + 1)
+                }, gesture.durationMs + 900L)
+            }
+
+            step.done -> {
+                stopAiPlay("IA finalizou: ${msg.take(45)}")
+                statusView?.setTextColor(Color.GREEN)
+            }
+
+            else -> {
+                main.postDelayed({
+                    runAiStep(stepIndex + 1)
+                }, gesture.durationMs + 900L)
+            }
+        }
+    }
+
     private fun scanFrame(forceStatus: Boolean = false) {
-        if (processing || planning) return
+        if (processing || aiPlaying) return
 
         val img = reader?.acquireLatestImage()
         if (img == null) {
@@ -506,38 +566,17 @@ class LineService : Service() {
                 val cue = detectorResult.cue
                 val balls = detectorResult.balls
 
-                latestCue = cue
-                latestBallCount = balls.size
-
-                val shot = if (!isShotExpired()) latestShot else null
-
-                if (latestShot != null && shot == null) {
-                    latestShot = null
-                    latestShotTime = 0L
-                    updateAimButton(false)
-                }
-
                 overlay?.update(
                     lines = emptyList(),
                     pockets = emptyList(),
                     cue = cue,
                     rayLine = null,
-                    autoShot = shot
+                    autoShot = null
                 )
 
-                val planStatus = when {
-                    shot != null -> "plano=OK"
-                    latestShot == null -> "plano=OFF"
-                    else -> "plano=VELHO"
-                }
-
                 postStatusLimited(
-                    text = "SCAN | branca=${if (cue != null) "OK" else "OFF"} | bolas=${balls.size} | $planStatus",
-                    color = when {
-                        shot != null -> Color.GREEN
-                        cue != null -> Color.YELLOW
-                        else -> Color.RED
-                    },
+                    text = "SCAN | branca=${if (cue != null) "OK" else "OFF"} | bolas=${balls.size}",
+                    color = if (cue != null) Color.GREEN else Color.YELLOW,
                     force = forceStatus
                 )
 
@@ -561,66 +600,6 @@ class LineService : Service() {
                 )
             }
         }
-    }
-
-    private fun performAutoAim() {
-        val shot = latestShot
-
-        if (shot == null) {
-            statusView?.text = "Sem plano IA"
-            statusView?.setTextColor(Color.RED)
-            updateAimButton(false)
-            return
-        }
-
-        if (isShotExpired()) {
-            latestShot = null
-            latestShotTime = 0L
-
-            overlay?.update(emptyList(), emptyList(), null, null, null)
-            updateAimButton(false)
-
-            statusView?.text = "Plano velho. Aperte IA JOGAR"
-            statusView?.setTextColor(Color.RED)
-            return
-        }
-
-        if (!AutoAimAccessibilityService.isRunning()) {
-            statusView?.text = "Acessibilidade OFF"
-            statusView?.setTextColor(Color.RED)
-            return
-        }
-
-        if (AutoAimAccessibilityService.isBusy()) {
-            statusView?.text = "AUTO ocupado..."
-            statusView?.setTextColor(Color.YELLOW)
-            return
-        }
-
-        val ok = AutoAimAccessibilityService.smartShot(
-            cueX = shot.cueX,
-            cueY = shot.cueY,
-            ghostX = shot.ghostX,
-            ghostY = shot.ghostY,
-            powerDistance = shot.powerDistance.coerceIn(130f, 340f),
-            durationMs = shot.durationMs.coerceIn(220L, 620L),
-            mode = AutoAimAccessibilityService.SHOT_MODE_CUE_PULL
-        )
-
-        if (ok) {
-            statusView?.text =
-                "AUTO IA ${(shot.confidence * 100f).toInt()}% | ${latestPlanMessage.take(45)}"
-            statusView?.setTextColor(Color.GREEN)
-        } else {
-            statusView?.text = "Falha no gesto IA"
-            statusView?.setTextColor(Color.RED)
-        }
-    }
-
-    private fun isShotExpired(): Boolean {
-        if (latestShot == null || latestShotTime <= 0L) return true
-
-        return SystemClock.uptimeMillis() - latestShotTime > shotExpireMs
     }
 
     private fun imageToBitmap(img: android.media.Image): Bitmap {
@@ -653,13 +632,13 @@ class LineService : Service() {
         }
     }
 
-    private fun updateAimButton(enabled: Boolean) {
+    private fun updateStopButton(enabled: Boolean) {
         main.post {
-            aimButton?.isEnabled = enabled
-            aimButton?.backgroundTintList =
+            stopButton?.isEnabled = enabled
+            stopButton?.backgroundTintList =
                 android.content.res.ColorStateList.valueOf(
                     if (enabled) {
-                        Color.argb(255, 0, 190, 255)
+                        Color.argb(255, 255, 90, 90)
                     } else {
                         Color.argb(255, 100, 100, 100)
                     }
@@ -685,7 +664,7 @@ class LineService : Service() {
     private fun cleanup() {
         autoScan = false
         processing = false
-        planning = false
+        aiPlaying = false
 
         main.removeCallbacks(scanLoop)
 
@@ -705,7 +684,7 @@ class LineService : Service() {
     override fun onDestroy() {
         autoScan = false
         processing = false
-        planning = false
+        aiPlaying = false
 
         main.removeCallbacksAndMessages(null)
 
@@ -761,7 +740,7 @@ class LineService : Service() {
     private fun buildNotif(): Notification {
         return NotificationCompat.Builder(this, CH)
             .setContentTitle("TacLines ativo")
-            .setContentText("IA Jogar ativa")
+            .setContentText("IA jogando por passos")
             .setSmallIcon(android.R.drawable.ic_menu_compass)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
