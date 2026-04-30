@@ -2,6 +2,7 @@ package com.tac.lines
 
 import android.graphics.Bitmap
 import android.graphics.Color
+import java.util.ArrayDeque
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.cos
@@ -13,19 +14,22 @@ import kotlin.math.sqrt
 
 data class Ball(val x: Float, val y: Float, val r: Float)
 data class Pocket(val x: Float, val y: Float)
-data class AimLine(val x1: Float, val y1: Float, val x2: Float, val y2: Float)
+
+// Linha nova da mira pequena esticada até o final da mesa.
+// Não chamei de AimLine para não bater com a AimLine antiga do LineCalc.
+data class RayLine(val x1: Float, val y1: Float, val x2: Float, val y2: Float)
 
 data class DetectionResult(
     val cue: Ball?,
     val balls: List<Ball>,
     val pockets: List<Pocket>,
-    val aimLine: AimLine?
+    val aimLine: RayLine?
 )
 
 object Detector {
 
-    // 0.18 deixava a bola branca quase invisível.
-    // 0.50 fica bem mais forte e ainda rápido.
+    // 0.18 deixava a bola branca pequena demais.
+    // 0.50 é mais pesado, mas bem mais certeiro.
     private const val SCALE = 0.50f
     private const val MAX_BALLS = 15
 
@@ -36,13 +40,13 @@ object Detector {
         val maxY: Int
     )
 
-    // Mantém compatibilidade com teu código antigo.
+    // Mantém compatibilidade com o código antigo.
     fun analyze(bmp: Bitmap): Triple<Ball?, List<Ball>, List<Pocket>> {
         val result = analyzeFull(bmp)
         return Triple(result.cue, result.balls, result.pockets)
     }
 
-    // Novo método completo: branca, bolas, caçapas e linha esticada da mira.
+    // Novo método: detecta branca, bolas, caçapas e a linha da mira esticada.
     fun analyzeFull(bmp: Bitmap): DetectionResult {
         val sw = (bmp.width * SCALE).toInt().coerceAtLeast(1)
         val sh = (bmp.height * SCALE).toInt().coerceAtLeast(1)
@@ -79,7 +83,7 @@ object Detector {
                 val q = ArrayDeque<Int>()
                 q.add(idx)
 
-                while (q.isNotEmpty() && cluster.size < 1200) {
+                while (!q.isEmpty && cluster.size < 1200) {
                     val cur = q.removeFirst()
                     if (cur !in pixels.indices || visited[cur]) continue
 
@@ -95,7 +99,12 @@ object Detector {
                     val cg = Color.green(cp)
                     val cb = Color.blue(cp)
 
-                    val ok = if (isW) isWhite(cr, cg, cb) else isColored(cr, cg, cb)
+                    val ok = if (isW) {
+                        isWhite(cr, cg, cb)
+                    } else {
+                        isColored(cr, cg, cb)
+                    }
+
                     if (!ok) continue
 
                     visited[cur] = true
@@ -134,7 +143,11 @@ object Detector {
                 continue
             }
 
-            if (deduped.none { hypot(b.x - it.x, b.y - it.y) < max(b.r, it.r) * 1.25f }) {
+            val duplicated = deduped.any {
+                hypot(b.x - it.x, b.y - it.y) < max(b.r, it.r) * 1.25f
+            }
+
+            if (!duplicated) {
                 deduped.add(b)
             }
         }
@@ -155,7 +168,14 @@ object Detector {
             Pocket(sx2 - 22f, sy2 - 22f)
         )
 
-        val aimLine = detectAimLine(pixels, sw, sh, table, cue, inv)
+        val aimLine = detectAimLine(
+            pixels = pixels,
+            sw = sw,
+            sh = sh,
+            table = table,
+            cue = cue,
+            inv = inv
+        )
 
         return DetectionResult(
             cue = cue,
@@ -196,7 +216,7 @@ object Detector {
                 q.add(idx)
                 visited[idx] = true
 
-                while (q.isNotEmpty()) {
+                while (!q.isEmpty) {
                     val cur = q.removeFirst()
                     val cx = cur % sw
                     val cy = cur / sw
@@ -321,7 +341,7 @@ object Detector {
         val ratio = bw.toFloat() / bh.toFloat().coerceAtLeast(1f)
         val fill = cluster.size.toFloat() / (bw * bh).toFloat().coerceAtLeast(1f)
 
-        // Caso normal: componente redondo.
+        // Caso normal: componente redondo da bola.
         if (bw in 2..35 && bh in 2..35 && ratio in 0.50f..1.90f && fill > 0.20f) {
             val cx = (sumX / cluster.size) * inv
             val cy = (sumY / cluster.size) * inv
@@ -330,7 +350,7 @@ object Detector {
         }
 
         // Caso especial: bola branca grudada na linha branca da mira.
-        // Aqui ele procura o ponto mais denso do componente para separar a bola da linha.
+        // Ele procura o ponto mais denso do componente para separar bola da linha.
         val searchR = 8
         val searchR2 = searchR * searchR
 
@@ -419,7 +439,7 @@ object Detector {
         table: Box,
         cue: Ball?,
         inv: Float
-    ): AimLine? {
+    ): RayLine? {
         if (cue == null) return null
 
         val cx = cue.x * SCALE
@@ -460,14 +480,13 @@ object Detector {
                 if (ang < 0f) ang += twoPi
 
                 val bin = ((ang / twoPi) * bins).toInt().coerceIn(0, bins - 1)
-
                 val distBonus = sqrt(d2).toInt() / 8
+
                 scores[bin] += 1 + distBonus
             }
         }
 
         val bestBin = scores.indices.maxByOrNull { scores[it] } ?: return null
-
         if (scores[bestBin] < 10) return null
 
         val angle = ((bestBin + 0.5f) / bins.toFloat()) * twoPi
@@ -490,6 +509,8 @@ object Detector {
                 if (px < table.minX || px > table.maxX || py < table.minY || py > table.maxY) continue
 
                 val idx = py * sw + px
+                if (idx !in pixels.indices) continue
+
                 val p = pixels[idx]
                 val r = Color.red(p)
                 val g = Color.green(p)
@@ -529,7 +550,7 @@ object Detector {
 
         if (endDistance <= 0f) return null
 
-        return AimLine(
+        return RayLine(
             x1 = cue.x,
             y1 = cue.y,
             x2 = cue.x + dirX * endDistance,
