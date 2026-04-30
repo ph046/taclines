@@ -43,6 +43,7 @@ class LineService : Service() {
     private var processing = false
     private var lastStatusTime = 0L
 
+    // Menor = mais rápido. Se travar, aumenta para 120L ou 150L.
     private val scanDelayMs = 85L
 
     private var statusView: TextView? = null
@@ -273,6 +274,13 @@ class LineService : Service() {
             statusView?.text = "AUTO ligado"
             statusView?.setTextColor(Color.YELLOW)
 
+            // Some com o painel para não interferir no toque do jogo.
+            main.postDelayed({
+                if (autoScan) {
+                    panel?.visibility = View.GONE
+                }
+            }, 1000L)
+
             main.removeCallbacks(scanLoop)
             main.post(scanLoop)
         } else {
@@ -282,6 +290,8 @@ class LineService : Service() {
 
             statusView?.text = "AUTO desligado"
             statusView?.setTextColor(Color.GRAY)
+
+            panel?.visibility = View.VISIBLE
 
             main.removeCallbacks(scanLoop)
             overlay?.update(emptyList(), emptyList(), null, null)
@@ -329,20 +339,22 @@ class LineService : Service() {
                         finalBmp.recycle()
                     }
 
+                    val cue = result.cue
                     val balls = result.balls
                     val rayLine = result.aimLine
 
                     overlay?.update(
                         lines = emptyList(),
                         pockets = emptyList(),
-                        cue = null,
+                        cue = cue,
                         rayLine = rayLine
                     )
 
                     val rayStatus = if (rayLine != null) "mira=OK" else "mira=OFF"
+                    val cueStatus = if (cue != null) "branca=OK" else "branca=OFF"
 
                     postStatusLimited(
-                        text = "$rayStatus | bolas=${balls.size}",
+                        text = "$rayStatus | $cueStatus | bolas=${balls.size}",
                         color = if (rayLine != null) Color.GREEN else Color.YELLOW,
                         force = forceStatus
                     )
@@ -357,6 +369,8 @@ class LineService : Service() {
                         }
                     } catch (_: Exception) {
                     }
+
+                    overlay?.update(emptyList(), emptyList(), null, null)
 
                     postStatusLimited(
                         text = "Erro scan",
@@ -466,6 +480,7 @@ class LineService : Service() {
     private fun buildNotif(): Notification {
         return NotificationCompat.Builder(this, CH)
             .setContentTitle("TacLines ativo")
+            .setContentText("Assistente de linha ativo")
             .setSmallIcon(android.R.drawable.ic_menu_compass)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
