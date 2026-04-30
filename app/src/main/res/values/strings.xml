@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">TacLines</string>
+    <string name="auto_aim_accessibility_description">Permite ao TacLines ajustar a mira automaticamente.</string>
 </resources>
