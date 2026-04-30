@@ -43,11 +43,15 @@ class LineService : Service() {
     private var processing = false
     private var lastStatusTime = 0L
 
-    // Se pesar no celular, muda para 120L ou 150L.
-    private val scanDelayMs = 85L
+    private val scanDelayMs = 110L
 
     private var statusView: TextView? = null
     private var scanButton: Button? = null
+    private var aimButton: Button? = null
+
+    private var latestShot: AutoAimShot? = null
+    private var latestCue: Ball? = null
+    private var latestBallCount = 0
 
     private val projCb = object : MediaProjection.Callback() {
         override fun onStop() {
@@ -166,30 +170,44 @@ class LineService : Service() {
     private fun addPanel() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.argb(210, 8, 8, 8))
+            setBackgroundColor(Color.argb(220, 8, 8, 8))
             setPadding(14, 14, 14, 14)
         }
 
         val btnScan = Button(this).apply {
-            text = "▶ AUTO"
+            text = "▶ SCAN"
             setTextColor(Color.BLACK)
             textSize = 13f
             backgroundTintList =
                 android.content.res.ColorStateList.valueOf(Color.argb(255, 0, 210, 80))
         }
 
+        val btnAim = Button(this).apply {
+            text = "🎯 AUTO AIM"
+            setTextColor(Color.BLACK)
+            textSize = 13f
+            backgroundTintList =
+                android.content.res.ColorStateList.valueOf(Color.argb(255, 0, 190, 255))
+        }
+
         val tvStatus = TextView(this).apply {
-            text = "AUTO desligado"
+            text = "SCAN desligado"
             setTextColor(Color.GRAY)
             textSize = 10f
             gravity = Gravity.CENTER
         }
 
         scanButton = btnScan
+        aimButton = btnAim
         statusView = tvStatus
 
         root.addView(
             btnScan,
+            LinearLayout.LayoutParams(-1, -2).also { it.bottomMargin = 6 }
+        )
+
+        root.addView(
+            btnAim,
             LinearLayout.LayoutParams(-1, -2).also { it.bottomMargin = 6 }
         )
 
@@ -199,7 +217,7 @@ class LineService : Service() {
         )
 
         val lp = WindowManager.LayoutParams(
-            220,
+            250,
             WindowManager.LayoutParams.WRAP_CONTENT,
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
@@ -255,6 +273,10 @@ class LineService : Service() {
             true
         }
 
+        btnAim.setOnClickListener {
+            performAutoAim()
+        }
+
         try {
             wm.addView(root, lp)
             panel = root
@@ -267,34 +289,30 @@ class LineService : Service() {
         autoScan = !autoScan
 
         if (autoScan) {
-            scanButton?.text = "■ AUTO"
+            scanButton?.text = "■ SCAN"
             scanButton?.backgroundTintList =
                 android.content.res.ColorStateList.valueOf(Color.argb(255, 255, 210, 0))
 
-            statusView?.text = "AUTO ligado"
+            statusView?.text = "Escaneando..."
             statusView?.setTextColor(Color.YELLOW)
-
-            // Esconde o painel para não interferir no toque do jogo.
-            main.postDelayed({
-                if (autoScan) {
-                    panel?.visibility = View.GONE
-                }
-            }, 1000L)
 
             main.removeCallbacks(scanLoop)
             main.post(scanLoop)
         } else {
-            scanButton?.text = "▶ AUTO"
+            scanButton?.text = "▶ SCAN"
             scanButton?.backgroundTintList =
                 android.content.res.ColorStateList.valueOf(Color.argb(255, 0, 210, 80))
 
-            statusView?.text = "AUTO desligado"
+            statusView?.text = "SCAN desligado"
             statusView?.setTextColor(Color.GRAY)
 
-            panel?.visibility = View.VISIBLE
-
             main.removeCallbacks(scanLoop)
-            overlay?.update(emptyList(), emptyList(), null, null)
+
+            latestShot = null
+            latestCue = null
+            latestBallCount = 0
+
+            overlay?.update(emptyList(), emptyList(), null, null, null)
         }
     }
 
@@ -341,21 +359,42 @@ class LineService : Service() {
 
                     val cue = result.cue
                     val balls = result.balls
+                    val pockets = result.pockets
                     val rayLine = result.aimLine
+
+                    val shot = AutoAimEngine.findBestShot(
+                        cue = cue,
+                        balls = balls,
+                        pockets = pockets
+                    )
+
+                    latestShot = shot
+                    latestCue = cue
+                    latestBallCount = balls.size
 
                     overlay?.update(
                         lines = emptyList(),
                         pockets = emptyList(),
                         cue = cue,
-                        rayLine = rayLine
+                        rayLine = rayLine,
+                        autoShot = shot
                     )
 
                     val rayStatus = if (rayLine != null) "mira=OK" else "mira=OFF"
                     val cueStatus = if (cue != null) "branca=OK" else "branca=OFF"
+                    val shotStatus = if (shot != null) {
+                        "shot=${(shot.confidence * 100f).toInt()}%"
+                    } else {
+                        "shot=OFF"
+                    }
 
                     postStatusLimited(
-                        text = "$rayStatus | $cueStatus | bolas=${balls.size}",
-                        color = if (rayLine != null) Color.GREEN else Color.YELLOW,
+                        text = "$rayStatus | $cueStatus | bolas=${balls.size} | $shotStatus",
+                        color = when {
+                            shot != null -> Color.GREEN
+                            cue != null -> Color.YELLOW
+                            else -> Color.RED
+                        },
                         force = forceStatus
                     )
 
@@ -370,7 +409,11 @@ class LineService : Service() {
                     } catch (_: Exception) {
                     }
 
-                    overlay?.update(emptyList(), emptyList(), null, null)
+                    latestShot = null
+                    latestCue = null
+                    latestBallCount = 0
+
+                    overlay?.update(emptyList(), emptyList(), null, null, null)
 
                     postStatusLimited(
                         text = "Erro scan",
@@ -386,6 +429,38 @@ class LineService : Service() {
                 img.close()
             } catch (_: Exception) {
             }
+        }
+    }
+
+    private fun performAutoAim() {
+        val shot = latestShot
+
+        if (shot == null) {
+            statusView?.text = "Sem jogada calculada"
+            statusView?.setTextColor(Color.RED)
+            return
+        }
+
+        if (!AutoAimAccessibilityService.isRunning()) {
+            statusView?.text = "Acessibilidade OFF"
+            statusView?.setTextColor(Color.RED)
+            return
+        }
+
+        val ok = AutoAimAccessibilityService.drag(
+            fromX = shot.pullFromX,
+            fromY = shot.pullFromY,
+            toX = shot.pullToX,
+            toY = shot.pullToY,
+            durationMs = shot.durationMs
+        )
+
+        if (ok) {
+            statusView?.text = "AUTO AIM enviado ${(shot.confidence * 100f).toInt()}%"
+            statusView?.setTextColor(Color.GREEN)
+        } else {
+            statusView?.text = "Falha no gesto"
+            statusView?.setTextColor(Color.RED)
         }
     }
 
