@@ -329,39 +329,21 @@ class LineService : Service() {
                         finalBmp.recycle()
                     }
 
-                    val cue = result.cue
                     val balls = result.balls
-                    val pockets = result.pockets
                     val rayLine = result.aimLine
 
-                    if (cue == null) {
-                        overlay?.update(emptyList(), pockets, null, null)
-
-                        postStatusLimited(
-                            text = "Branca nao vista | bolas=${balls.size}",
-                            color = Color.RED,
-                            force = forceStatus
-                        )
-
-                        processing = false
-                        return@post
-                    }
-
-                    val lines = LineCalc.calculate(cue, balls, pockets)
-
                     overlay?.update(
-                        lines = lines,
-                        pockets = pockets,
-                        cue = cue,
+                        lines = emptyList(),
+                        pockets = emptyList(),
+                        cue = null,
                         rayLine = rayLine
                     )
 
-                    val scoring = lines.count { it.willScore }
                     val rayStatus = if (rayLine != null) "mira=OK" else "mira=OFF"
 
                     postStatusLimited(
-                        text = "$rayStatus | verde=$scoring | bolas=${balls.size}",
-                        color = Color.GREEN,
+                        text = "$rayStatus | bolas=${balls.size}",
+                        color = if (rayLine != null) Color.GREEN else Color.YELLOW,
                         force = forceStatus
                     )
 
