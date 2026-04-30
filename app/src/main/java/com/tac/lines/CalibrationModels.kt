@@ -30,22 +30,42 @@ data class AiCalibration(
 ) {
     fun cueAsBall(): Ball? {
         val c = cueBall ?: return null
-        return Ball(c.x, c.y, c.r)
+        return Ball(c.x, c.y, normalizeRadius(c.r))
     }
 
     fun ballsAsList(): List<Ball> {
-        return balls.map { Ball(it.x, it.y, it.r) }
+        return balls
+            .filter { it.r > 0f }
+            .map { Ball(it.x, it.y, normalizeRadius(it.r)) }
     }
 
     fun pocketsAsList(): List<Pocket> {
         return pockets.map { Pocket(it.x, it.y) }
     }
 
-    fun isUsable(): Boolean {
-        return ok &&
-                confidence >= 0.70f &&
-                cueBall != null &&
+    fun hasBasicData(): Boolean {
+        return cueBall != null &&
                 balls.isNotEmpty() &&
                 pockets.size >= 4
+    }
+
+    fun isUsable(): Boolean {
+        return ok &&
+                confidence >= 0.45f &&
+                hasBasicData()
+    }
+
+    fun statusText(): String {
+        return when {
+            isUsable() -> "IA=OK ${(confidence * 100f).toInt()}%"
+            !ok -> "IA=OFF"
+            !hasBasicData() -> "IA fraca: dados incompletos"
+            confidence < 0.45f -> "IA fraca ${(confidence * 100f).toInt()}%"
+            else -> "IA=OFF"
+        }
+    }
+
+    private fun normalizeRadius(r: Float): Float {
+        return r.coerceIn(6f, 28f)
     }
 }
