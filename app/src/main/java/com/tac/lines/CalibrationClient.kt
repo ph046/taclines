@@ -17,7 +17,7 @@ object CalibrationClient {
      * O Android chama teu backend.
      * Teu backend chama a OpenAI.
      */
-    private const val CALIBRATION_URL = "https://SEU-BACKEND.com/calibrate"
+    private const val CALIBRATION_URL = "https://taclines-backend.onrender.com/calibrate"
 
     fun calibrate(bitmap: Bitmap): AiCalibration {
         val jpegBase64 = bitmapToBase64Jpeg(bitmap)
