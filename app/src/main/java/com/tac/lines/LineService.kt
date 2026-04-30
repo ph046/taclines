@@ -43,7 +43,7 @@ class LineService : Service() {
     private var processing = false
     private var lastStatusTime = 0L
 
-    // Menor = mais rápido. Se travar, aumenta para 120L ou 150L.
+    // Se pesar no celular, muda para 120L ou 150L.
     private val scanDelayMs = 85L
 
     private var statusView: TextView? = null
@@ -274,7 +274,7 @@ class LineService : Service() {
             statusView?.text = "AUTO ligado"
             statusView?.setTextColor(Color.YELLOW)
 
-            // Some com o painel para não interferir no toque do jogo.
+            // Esconde o painel para não interferir no toque do jogo.
             main.postDelayed({
                 if (autoScan) {
                     panel?.visibility = View.GONE
