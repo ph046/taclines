@@ -132,7 +132,7 @@ object Detector {
         }
 
         val cue = whites
-            .filter { it.r in 4f..28f }
+            .filter { it.r in 4f..30f }
             .maxByOrNull { it.r }
 
         val deduped = mutableListOf<Ball>()
@@ -184,89 +184,57 @@ object Detector {
     }
 
     private fun detectTableBox(pixels: IntArray, sw: Int, sh: Int): Box {
-        val visited = BooleanArray(pixels.size)
+        var minX = sw
+        var minY = sh
+        var maxX = 0
+        var maxY = 0
+        var count = 0
 
-        var best: Box? = null
-        var bestCount = 0
+        val scanMinX = (sw * 0.24f).toInt()
+        val scanMaxX = (sw * 0.82f).toInt()
+        val scanMinY = (sh * 0.18f).toInt()
+        val scanMaxY = (sh * 0.90f).toInt()
 
-        for (y in 0 until sh) {
-            for (x in 0 until sw) {
+        for (y in scanMinY..scanMaxY) {
+            for (x in scanMinX..scanMaxX) {
                 val idx = y * sw + x
-                if (visited[idx]) continue
+                if (idx !in pixels.indices) continue
 
                 val p = pixels[idx]
                 val r = Color.red(p)
                 val g = Color.green(p)
                 val b = Color.blue(p)
 
-                if (!isGreen(r, g, b)) {
-                    visited[idx] = true
-                    continue
-                }
-
-                var count = 0
-                var minX = x
-                var maxX = x
-                var minY = y
-                var maxY = y
-
-                val q = ArrayDeque<Int>()
-                q.add(idx)
-                visited[idx] = true
-
-                while (!q.isEmpty()) {
-                    val cur = q.removeFirst()
-                    val cx = cur % sw
-                    val cy = cur / sw
-
+                if (isGreen(r, g, b)) {
+                    if (x < minX) minX = x
+                    if (x > maxX) maxX = x
+                    if (y < minY) minY = y
+                    if (y > maxY) maxY = y
                     count++
-
-                    if (cx < minX) minX = cx
-                    if (cx > maxX) maxX = cx
-                    if (cy < minY) minY = cy
-                    if (cy > maxY) maxY = cy
-
-                    fun tryAdd(n: Int) {
-                        if (n !in pixels.indices || visited[n]) return
-
-                        val np = pixels[n]
-                        val nr = Color.red(np)
-                        val ng = Color.green(np)
-                        val nb = Color.blue(np)
-
-                        if (isGreen(nr, ng, nb)) {
-                            visited[n] = true
-                            q.add(n)
-                        }
-                    }
-
-                    if (cx + 1 < sw) tryAdd(cur + 1)
-                    if (cx - 1 >= 0) tryAdd(cur - 1)
-                    if (cy + 1 < sh) tryAdd(cur + sw)
-                    if (cy - 1 >= 0) tryAdd(cur - sw)
-                }
-
-                val bw = maxX - minX + 1
-                val bh = maxY - minY + 1
-
-                val looksLikeTable =
-                    count > 250 &&
-                            bw > sw * 0.20f &&
-                            bh > sh * 0.15f &&
-                            bw > bh
-
-                if (looksLikeTable && count > bestCount) {
-                    bestCount = count
-                    best = Box(minX, minY, maxX, maxY)
                 }
             }
         }
 
-        return best ?: Box(
-            minX = (sw * 0.18f).toInt(),
-            minY = (sh * 0.18f).toInt(),
-            maxX = (sw * 0.82f).toInt(),
-            maxY = (sh * 0.88f).toInt()
+        if (count < 500 || minX >= maxX || minY >= maxY) {
+            return Box(
+                minX = (sw * 0.28f).toInt(),
+                minY = (sh * 0.27f).toInt(),
+                maxX = (sw * 0.76f).toInt(),
+                maxY = (sh * 0.81f).toInt()
+            )
+        }
+
+        val w = maxX - minX
+        val h = maxY - minY
+
+        val padX = (w * 0.015f).toInt()
+        val padY = (h * 0.025f).toInt()
+
+        return Box(
+            minX = (minX + padX).coerceIn(0, sw - 1),
+            minY = (minY + padY).coerceIn(0, sh - 1),
+            maxX = (maxX - padX).coerceIn(0, sw - 1),
+            maxY = (maxY - padY).coerceIn(0, sh - 1)
         )
     }
 
@@ -441,8 +409,8 @@ object Detector {
         val cy = cue.y * SCALE
         val cr = cue.r * SCALE
 
-        val minDist = (cr + 5f).coerceAtLeast(7f)
-        val maxDist = (180f * SCALE).coerceAtLeast(60f)
+        val minDist = (cr + 4f).coerceAtLeast(6f)
+        val maxDist = (230f * SCALE).coerceAtLeast(80f)
 
         val bins = 180
         val scores = IntArray(bins)
@@ -482,7 +450,7 @@ object Detector {
         }
 
         val bestBin = scores.indices.maxByOrNull { scores[it] } ?: return null
-        if (scores[bestBin] < 10) return null
+        if (scores[bestBin] < 6) return null
 
         val angle = ((bestBin + 0.5f) / bins.toFloat()) * twoPi
         val dirX = cos(angle.toDouble()).toFloat()
@@ -495,7 +463,7 @@ object Detector {
         while (t <= maxDist) {
             var found = false
 
-            for (off in -2..2) {
+            for (off in -3..3) {
                 val px = (cx + dirX * t - dirY * off).roundToInt()
                 val py = (cy + dirY * t + dirX * off).roundToInt()
 
@@ -524,7 +492,7 @@ object Detector {
             t += 1.5f
         }
 
-        if (hits < 6 || farthest < minDist + 12f) return null
+        if (hits < 4 || farthest < minDist + 8f) return null
 
         val left = table.minX * inv
         val top = table.minY * inv
@@ -637,8 +605,6 @@ object Detector {
     }
 
     private fun isAimPixel(r: Int, g: Int, b: Int): Boolean {
-        if (isGreen(r, g, b)) return false
-
         val mx = maxOf(r, g, b)
         val mn = minOf(r, g, b)
         val diff = mx - mn
@@ -646,16 +612,24 @@ object Detector {
         val lum = 0.2126f * r + 0.7152f * g + 0.0722f * b
         val sat = if (mx == 0) 0f else diff / mx.toFloat()
 
-        val whiteLine =
-            lum > 135f &&
-                    mn > 95 &&
-                    sat < 0.38f
+        val whiteAim =
+            lum > 125f &&
+                    mn > 85 &&
+                    sat < 0.42f
 
-        val blueLine =
-            b > 100 &&
-                    b > r + 20 &&
-                    b > g + 5
+        val coloredAim =
+            mx > 90 &&
+                    lum > 45f &&
+                    sat > 0.22f
 
-        return whiteLine || blueLine
+        val normalTableGreen =
+            g > r + 18 &&
+                    g > b + 18 &&
+                    g in 60..190 &&
+                    r < 110 &&
+                    b < 110 &&
+                    lum < 150f
+
+        return (whiteAim || coloredAim) && !normalTableGreen
     }
 }
