@@ -1,0 +1,27 @@
+name: Build APK
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: 8.7
+      - run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+      - run: $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platforms;android-34" "build-tools;34.0.0" || true
+      - run: gradle assembleDebug
+        env:
+          ANDROID_HOME: /usr/local/lib/android/sdk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TacLines-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
