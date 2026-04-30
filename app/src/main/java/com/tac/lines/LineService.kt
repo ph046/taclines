@@ -517,9 +517,6 @@ class LineService : Service() {
                     updateAimButton(false)
                 }
 
-                // IMPORTANTE:
-                // não usamos mais rayLine/detectorResult.aimLine,
-                // porque aquela linha azul/cyan era a parte bugada.
                 overlay?.update(
                     lines = emptyList(),
                     pockets = emptyList(),
@@ -594,20 +591,28 @@ class LineService : Service() {
             return
         }
 
-        val ok = AutoAimAccessibilityService.drag(
-            fromX = shot.pullFromX,
-            fromY = shot.pullFromY,
-            toX = shot.pullToX,
-            toY = shot.pullToY,
-            durationMs = shot.durationMs
+        if (AutoAimAccessibilityService.isBusy()) {
+            statusView?.text = "AUTO ocupado..."
+            statusView?.setTextColor(Color.YELLOW)
+            return
+        }
+
+        val ok = AutoAimAccessibilityService.smartShot(
+            cueX = shot.cueX,
+            cueY = shot.cueY,
+            ghostX = shot.ghostX,
+            ghostY = shot.ghostY,
+            powerDistance = shot.powerDistance.coerceIn(130f, 340f),
+            durationMs = shot.durationMs.coerceIn(220L, 620L),
+            mode = AutoAimAccessibilityService.SHOT_MODE_CUE_PULL
         )
 
         if (ok) {
             statusView?.text =
-                "AUTO enviado ${(shot.confidence * 100f).toInt()}% | ${latestPlanMessage.take(45)}"
+                "AUTO IA ${(shot.confidence * 100f).toInt()}% | ${latestPlanMessage.take(45)}"
             statusView?.setTextColor(Color.GREEN)
         } else {
-            statusView?.text = "Falha no gesto"
+            statusView?.text = "Falha no gesto IA"
             statusView?.setTextColor(Color.RED)
         }
     }
