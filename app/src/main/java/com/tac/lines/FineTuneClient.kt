@@ -2,6 +2,7 @@ package com.tac.lines
 
 import android.graphics.Bitmap
 import android.util.Base64
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
@@ -21,11 +22,18 @@ object FineTuneClient {
     fun fineTune(
         bitmap: Bitmap,
         stepIndex: Int,
-        maxSteps: Int = 4
+        maxSteps: Int = 4,
+        calibratedPocketsJson: String = "[]"
     ): FineTuneResult {
         return try {
             val upload = makeUploadBitmap(bitmap, maxSide = 1280)
             val jpegBase64 = bitmapToBase64Jpeg(upload.bitmap)
+
+            val pocketsArray = try {
+                JSONArray(calibratedPocketsJson)
+            } catch (_: Exception) {
+                JSONArray()
+            }
 
             val payload = JSONObject().apply {
                 put("image_base64", jpegBase64)
@@ -37,6 +45,9 @@ object FineTuneClient {
                 put("original_height", bitmap.height)
                 put("upload_width", upload.bitmap.width)
                 put("upload_height", upload.bitmap.height)
+
+                // NOVO: manda os 6 buracos calibrados para o backend
+                put("calibrated_pockets", pocketsArray)
             }
 
             val conn = URL(FINE_TUNE_URL).openConnection() as HttpURLConnection
