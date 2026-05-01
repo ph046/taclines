@@ -606,7 +606,8 @@ class LineService : Service() {
                 val result = FineTuneClient.fineTune(
                     bitmap = finalBmp,
                     stepIndex = stepIndex,
-                    maxSteps = maxFineTuneSteps
+                    maxSteps = maxFineTuneSteps,
+                    calibratedPocketsJson = PocketCalibration.toPayloadJson(this@LineService)
                 )
 
                 if (!finalBmp.isRecycled) {
