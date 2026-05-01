@@ -41,15 +41,15 @@ class LineService : Service() {
 
     private var autoScan = false
     private var processing = false
-    private var aiPlaying = false
+    private var fineTuning = false
     private var lastStatusTime = 0L
 
     private val scanDelayMs = 350L
-    private val maxAiSteps = 5
+    private val maxFineTuneSteps = 4
 
     private var statusView: TextView? = null
     private var scanButton: Button? = null
-    private var aiButton: Button? = null
+    private var tuneButton: Button? = null
     private var stopButton: Button? = null
 
     private val projCb = object : MediaProjection.Callback() {
@@ -181,12 +181,12 @@ class LineService : Service() {
                 android.content.res.ColorStateList.valueOf(Color.argb(255, 0, 210, 80))
         }
 
-        val btnAi = Button(this).apply {
-            text = "🤖 IA JOGAR"
+        val btnTune = Button(this).apply {
+            text = "🎯 AJUSTAR IA"
             setTextColor(Color.BLACK)
             textSize = 13f
             backgroundTintList =
-                android.content.res.ColorStateList.valueOf(Color.argb(255, 180, 120, 255))
+                android.content.res.ColorStateList.valueOf(Color.argb(255, 0, 190, 255))
         }
 
         val btnStop = Button(this).apply {
@@ -199,14 +199,14 @@ class LineService : Service() {
         }
 
         val tvStatus = TextView(this).apply {
-            text = "Pronto | aperte IA JOGAR"
+            text = "Mire perto e aperte AJUSTAR IA"
             setTextColor(Color.GRAY)
             textSize = 10f
             gravity = Gravity.CENTER
         }
 
         scanButton = btnScan
-        aiButton = btnAi
+        tuneButton = btnTune
         stopButton = btnStop
         statusView = tvStatus
 
@@ -216,7 +216,7 @@ class LineService : Service() {
         )
 
         root.addView(
-            btnAi,
+            btnTune,
             LinearLayout.LayoutParams(-1, -2).also { it.bottomMargin = 6 }
         )
 
@@ -231,7 +231,7 @@ class LineService : Service() {
         )
 
         val lp = WindowManager.LayoutParams(
-            270,
+            280,
             WindowManager.LayoutParams.WRAP_CONTENT,
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
@@ -287,12 +287,12 @@ class LineService : Service() {
             true
         }
 
-        btnAi.setOnClickListener {
-            startAiPlay()
+        btnTune.setOnClickListener {
+            startFineTune()
         }
 
         btnStop.setOnClickListener {
-            stopAiPlay("IA parada")
+            stopFineTune("IA parada")
         }
 
         try {
@@ -321,7 +321,7 @@ class LineService : Service() {
             scanButton?.backgroundTintList =
                 android.content.res.ColorStateList.valueOf(Color.argb(255, 0, 210, 80))
 
-            statusView?.text = "SCAN desligado | aperte IA JOGAR"
+            statusView?.text = "SCAN desligado | mire e aperte AJUSTAR IA"
             statusView?.setTextColor(Color.GRAY)
 
             main.removeCallbacks(scanLoop)
@@ -329,8 +329,8 @@ class LineService : Service() {
         }
     }
 
-    private fun startAiPlay() {
-        if (aiPlaying) return
+    private fun startFineTune() {
+        if (fineTuning) return
 
         if (!AutoAimAccessibilityService.isRunning()) {
             statusView?.text = "Acessibilidade OFF"
@@ -338,54 +338,56 @@ class LineService : Service() {
             return
         }
 
-        aiPlaying = true
+        fineTuning = true
         autoScan = false
+
         main.removeCallbacks(scanLoop)
 
         scanButton?.text = "▶ SCAN"
         scanButton?.backgroundTintList =
             android.content.res.ColorStateList.valueOf(Color.argb(255, 0, 210, 80))
 
-        updateAiButton(false)
+        updateTuneButton(false)
         updateStopButton(true)
 
         overlay?.update(emptyList(), emptyList(), null, null, null)
 
-        statusView?.text = "IA jogando..."
+        statusView?.text = "IA ajustando mira..."
         statusView?.setTextColor(Color.YELLOW)
 
         main.postDelayed({
-            runAiStep(0)
+            runFineTuneStep(0)
         }, 350L)
     }
 
-    private fun stopAiPlay(message: String) {
-        aiPlaying = false
-        updateAiButton(true)
+    private fun stopFineTune(message: String) {
+        fineTuning = false
+
+        updateTuneButton(true)
         updateStopButton(false)
 
         statusView?.text = message
         statusView?.setTextColor(Color.GRAY)
     }
 
-    private fun runAiStep(stepIndex: Int) {
-        if (!aiPlaying) return
+    private fun runFineTuneStep(stepIndex: Int) {
+        if (!fineTuning) return
 
-        if (stepIndex >= maxAiSteps) {
-            stopAiPlay("IA parou: limite de passos")
+        if (stepIndex >= maxFineTuneSteps) {
+            stopFineTune("IA parou: limite de ajustes")
             return
         }
 
         if (AutoAimAccessibilityService.isBusy()) {
             main.postDelayed({
-                runAiStep(stepIndex)
-            }, 300L)
+                runFineTuneStep(stepIndex)
+            }, 250L)
             return
         }
 
         val img = reader?.acquireLatestImage()
         if (img == null) {
-            stopAiPlay("IA: sem imagem")
+            stopFineTune("IA: sem imagem")
             statusView?.setTextColor(Color.RED)
             return
         }
@@ -403,20 +405,20 @@ class LineService : Service() {
         }
 
         if (finalBmp == null) {
-            stopAiPlay("IA: erro imagem")
+            stopFineTune("IA: erro imagem")
             statusView?.setTextColor(Color.RED)
             return
         }
 
-        statusView?.text = "IA vendo tela ${stepIndex + 1}/$maxAiSteps..."
+        statusView?.text = "IA vendo mira ${stepIndex + 1}/$maxFineTuneSteps..."
         statusView?.setTextColor(Color.YELLOW)
 
         bg.post {
             try {
-                val step = AiPlayerClient.playStep(
+                val result = FineTuneClient.fineTune(
                     bitmap = finalBmp,
                     stepIndex = stepIndex,
-                    maxSteps = maxAiSteps
+                    maxSteps = maxFineTuneSteps
                 )
 
                 if (!finalBmp.isRecycled) {
@@ -424,7 +426,7 @@ class LineService : Service() {
                 }
 
                 main.post {
-                    handleAiStep(step, stepIndex)
+                    handleFineTuneResult(result, stepIndex)
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -437,34 +439,34 @@ class LineService : Service() {
                 }
 
                 main.post {
-                    stopAiPlay("IA erro: ${e.message ?: "backend"}")
+                    stopFineTune("IA erro: ${e.message ?: "backend"}")
                     statusView?.setTextColor(Color.RED)
                 }
             }
         }
     }
 
-    private fun handleAiStep(step: AiPlayStep, stepIndex: Int) {
-        if (!aiPlaying) return
+    private fun handleFineTuneResult(result: FineTuneResult, stepIndex: Int) {
+        if (!fineTuning) return
 
-        val msg = step.message.ifBlank { step.action }
+        val msg = result.message.ifBlank { result.action }
 
-        if (step.isStopAction()) {
-            stopAiPlay("IA parou: ${msg.take(55)}")
+        if (result.isStop()) {
+            stopFineTune("IA parou: ${msg.take(55)}")
             statusView?.setTextColor(Color.RED)
             return
         }
 
-        if (!step.ok || !step.isUsable()) {
-            stopAiPlay("IA falhou: ${msg.take(55)}")
+        if (!result.ok || !result.isUsable()) {
+            stopFineTune("IA falhou: ${msg.take(55)}")
             statusView?.setTextColor(Color.RED)
             return
         }
 
-        val gesture = step.gesture
+        val gesture = result.gesture
 
         if (gesture == null) {
-            stopAiPlay("IA sem gesto")
+            stopFineTune("IA sem gesto")
             statusView?.setTextColor(Color.RED)
             return
         }
@@ -478,47 +480,41 @@ class LineService : Service() {
         )
 
         if (!ok) {
-            stopAiPlay("Falha ao executar gesto")
+            stopFineTune("Falha ao executar gesto")
             statusView?.setTextColor(Color.RED)
             return
         }
 
         when {
-            step.isShootAction() -> {
+            result.isShoot() -> {
                 statusView?.text =
-                    "IA bateu ${(step.confidence * 100f).toInt()}% | ${msg.take(45)}"
+                    "IA bateu ${(result.confidence * 100f).toInt()}% | força ${(result.power * 100f).toInt()}%"
                 statusView?.setTextColor(Color.GREEN)
 
                 main.postDelayed({
-                    stopAiPlay("IA finalizou")
-                }, gesture.durationMs + 1200L)
+                    stopFineTune("IA finalizou")
+                }, gesture.durationMs + 1000L)
             }
 
-            step.isDragAction() -> {
+            result.isAdjust() -> {
                 statusView?.text =
-                    "IA ajustando ${(step.confidence * 100f).toInt()}% | ${msg.take(45)}"
+                    "IA ajuste ${result.direction} ${result.pixels.toInt()}px | ${(result.confidence * 100f).toInt()}%"
                 statusView?.setTextColor(Color.YELLOW)
 
                 main.postDelayed({
-                    runAiStep(stepIndex + 1)
-                }, gesture.durationMs + 900L)
-            }
-
-            step.done -> {
-                stopAiPlay("IA finalizou: ${msg.take(45)}")
-                statusView?.setTextColor(Color.GREEN)
+                    runFineTuneStep(stepIndex + 1)
+                }, gesture.durationMs + 750L)
             }
 
             else -> {
-                main.postDelayed({
-                    runAiStep(stepIndex + 1)
-                }, gesture.durationMs + 900L)
+                stopFineTune("IA finalizou: ${msg.take(45)}")
+                statusView?.setTextColor(Color.GREEN)
             }
         }
     }
 
     private fun scanFrame(forceStatus: Boolean = false) {
-        if (processing || aiPlaying) return
+        if (processing || fineTuning) return
 
         val img = reader?.acquireLatestImage()
         if (img == null) {
@@ -618,13 +614,13 @@ class LineService : Service() {
         }
     }
 
-    private fun updateAiButton(enabled: Boolean) {
+    private fun updateTuneButton(enabled: Boolean) {
         main.post {
-            aiButton?.isEnabled = enabled
-            aiButton?.backgroundTintList =
+            tuneButton?.isEnabled = enabled
+            tuneButton?.backgroundTintList =
                 android.content.res.ColorStateList.valueOf(
                     if (enabled) {
-                        Color.argb(255, 180, 120, 255)
+                        Color.argb(255, 0, 190, 255)
                     } else {
                         Color.argb(255, 100, 100, 100)
                     }
@@ -664,7 +660,7 @@ class LineService : Service() {
     private fun cleanup() {
         autoScan = false
         processing = false
-        aiPlaying = false
+        fineTuning = false
 
         main.removeCallbacks(scanLoop)
 
@@ -684,7 +680,7 @@ class LineService : Service() {
     override fun onDestroy() {
         autoScan = false
         processing = false
-        aiPlaying = false
+        fineTuning = false
 
         main.removeCallbacksAndMessages(null)
 
@@ -740,7 +736,7 @@ class LineService : Service() {
     private fun buildNotif(): Notification {
         return NotificationCompat.Builder(this, CH)
             .setContentTitle("TacLines ativo")
-            .setContentText("IA jogando por passos")
+            .setContentText("Ajuste fino IA ativo")
             .setSmallIcon(android.R.drawable.ic_menu_compass)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
