@@ -29,6 +29,7 @@ class LineService : Service() {
     private lateinit var wm: WindowManager
     private var overlay: OverlayView? = null
     private var panel: View? = null
+    private var pocketCaptureView: View? = null
 
     private var sw = 0
     private var sh = 0
@@ -42,6 +43,7 @@ class LineService : Service() {
     private var autoScan = false
     private var processing = false
     private var fineTuning = false
+    private var calibratingPockets = false
     private var lastStatusTime = 0L
 
     private val scanDelayMs = 350L
@@ -49,8 +51,11 @@ class LineService : Service() {
 
     private var statusView: TextView? = null
     private var scanButton: Button? = null
+    private var pocketButton: Button? = null
     private var tuneButton: Button? = null
     private var stopButton: Button? = null
+
+    private val pocketPoints = mutableListOf<CalibratedPocket>()
 
     private val projCb = object : MediaProjection.Callback() {
         override fun onStop() {
@@ -181,6 +186,14 @@ class LineService : Service() {
                 android.content.res.ColorStateList.valueOf(Color.argb(255, 0, 210, 80))
         }
 
+        val btnPockets = Button(this).apply {
+            text = "🎱 BURACOS"
+            setTextColor(Color.BLACK)
+            textSize = 13f
+            backgroundTintList =
+                android.content.res.ColorStateList.valueOf(Color.argb(255, 255, 180, 40))
+        }
+
         val btnTune = Button(this).apply {
             text = "🎯 AJUSTAR IA"
             setTextColor(Color.BLACK)
@@ -199,19 +212,29 @@ class LineService : Service() {
         }
 
         val tvStatus = TextView(this).apply {
-            text = "Mire perto e aperte AJUSTAR IA"
+            text = if (PocketCalibration.isComplete(this@LineService)) {
+                "Buracos OK | mire e aperte AJUSTAR IA"
+            } else {
+                "Calibre os buracos primeiro"
+            }
             setTextColor(Color.GRAY)
             textSize = 10f
             gravity = Gravity.CENTER
         }
 
         scanButton = btnScan
+        pocketButton = btnPockets
         tuneButton = btnTune
         stopButton = btnStop
         statusView = tvStatus
 
         root.addView(
             btnScan,
+            LinearLayout.LayoutParams(-1, -2).also { it.bottomMargin = 6 }
+        )
+
+        root.addView(
+            btnPockets,
             LinearLayout.LayoutParams(-1, -2).also { it.bottomMargin = 6 }
         )
 
@@ -231,7 +254,7 @@ class LineService : Service() {
         )
 
         val lp = WindowManager.LayoutParams(
-            280,
+            290,
             WindowManager.LayoutParams.WRAP_CONTENT,
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
@@ -287,12 +310,29 @@ class LineService : Service() {
             true
         }
 
+        btnPockets.setOnClickListener {
+            startPocketCalibration()
+        }
+
+        btnPockets.setOnLongClickListener {
+            PocketCalibration.clear(this@LineService)
+            pocketPoints.clear()
+            overlay?.update(emptyList(), emptyList(), null, null, null)
+            statusView?.text = "Buracos apagados"
+            statusView?.setTextColor(Color.RED)
+            true
+        }
+
         btnTune.setOnClickListener {
             startFineTune()
         }
 
         btnStop.setOnClickListener {
-            stopFineTune("IA parada")
+            if (calibratingPockets) {
+                stopPocketCalibration("Calibração cancelada")
+            } else {
+                stopFineTune("IA parada")
+            }
         }
 
         try {
@@ -304,6 +344,8 @@ class LineService : Service() {
     }
 
     private fun toggleAutoScan() {
+        if (calibratingPockets || fineTuning) return
+
         autoScan = !autoScan
 
         if (autoScan) {
@@ -321,16 +363,160 @@ class LineService : Service() {
             scanButton?.backgroundTintList =
                 android.content.res.ColorStateList.valueOf(Color.argb(255, 0, 210, 80))
 
-            statusView?.text = "SCAN desligado | mire e aperte AJUSTAR IA"
+            statusView?.text = "SCAN desligado"
             statusView?.setTextColor(Color.GRAY)
 
             main.removeCallbacks(scanLoop)
-            overlay?.update(emptyList(), emptyList(), null, null, null)
+            overlay?.update(emptyList(), PocketCalibration.toPocketList(this), null, null, null)
         }
     }
 
+    private fun startPocketCalibration() {
+        if (fineTuning || calibratingPockets) return
+
+        autoScan = false
+        main.removeCallbacks(scanLoop)
+
+        scanButton?.text = "▶ SCAN"
+        scanButton?.backgroundTintList =
+            android.content.res.ColorStateList.valueOf(Color.argb(255, 0, 210, 80))
+
+        calibratingPockets = true
+        pocketPoints.clear()
+
+        updateTuneButton(false)
+        updatePocketButton(false)
+        updateStopButton(true)
+
+        overlay?.update(emptyList(), emptyList(), null, null, null)
+
+        statusView?.text = "Toque no buraco ${PocketCalibration.labelFor(PocketCalibration.REQUIRED_ORDER[0])}"
+        statusView?.setTextColor(Color.YELLOW)
+
+        addPocketCaptureLayer()
+    }
+
+    private fun addPocketCaptureLayer() {
+        removePocketCaptureLayer()
+
+        val v = View(this).apply {
+            setBackgroundColor(Color.TRANSPARENT)
+
+            setOnTouchListener { _, e ->
+                if (!calibratingPockets) return@setOnTouchListener false
+
+                when (e.action) {
+                    MotionEvent.ACTION_UP -> {
+                        recordPocketTap(e.rawX, e.rawY)
+                        true
+                    }
+
+                    else -> true
+                }
+            }
+        }
+
+        val lp = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+            } else {
+                @Suppress("DEPRECATION")
+                WindowManager.LayoutParams.TYPE_PHONE
+            },
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT
+        )
+
+        try {
+            wm.addView(v, lp)
+            pocketCaptureView = v
+        } catch (e: Exception) {
+            e.printStackTrace()
+            stopPocketCalibration("Erro ao abrir captura")
+            statusView?.setTextColor(Color.RED)
+        }
+    }
+
+    private fun recordPocketTap(x: Float, y: Float) {
+        if (!calibratingPockets) return
+
+        val index = pocketPoints.size
+
+        if (index >= PocketCalibration.REQUIRED_ORDER.size) return
+
+        val id = PocketCalibration.REQUIRED_ORDER[index]
+
+        pocketPoints.add(
+            CalibratedPocket(
+                id = id,
+                x = x,
+                y = y
+            )
+        )
+
+        val preview = pocketPoints.map { Pocket(it.x, it.y) }
+        overlay?.update(emptyList(), preview, null, null, null)
+
+        if (pocketPoints.size >= PocketCalibration.REQUIRED_ORDER.size) {
+            PocketCalibration.save(this, pocketPoints.toList())
+
+            removePocketCaptureLayer()
+
+            calibratingPockets = false
+            updateTuneButton(true)
+            updatePocketButton(true)
+            updateStopButton(false)
+
+            statusView?.text = "Buracos salvos ✅"
+            statusView?.setTextColor(Color.GREEN)
+
+            overlay?.update(emptyList(), PocketCalibration.toPocketList(this), null, null, null)
+            return
+        }
+
+        val nextId = PocketCalibration.REQUIRED_ORDER[pocketPoints.size]
+
+        statusView?.text =
+            "Salvo ${pocketPoints.size}/6 | toque ${PocketCalibration.labelFor(nextId)}"
+        statusView?.setTextColor(Color.YELLOW)
+    }
+
+    private fun stopPocketCalibration(message: String) {
+        calibratingPockets = false
+        pocketPoints.clear()
+
+        removePocketCaptureLayer()
+
+        updateTuneButton(true)
+        updatePocketButton(true)
+        updateStopButton(false)
+
+        statusView?.text = message
+        statusView?.setTextColor(Color.GRAY)
+
+        overlay?.update(emptyList(), PocketCalibration.toPocketList(this), null, null, null)
+    }
+
+    private fun removePocketCaptureLayer() {
+        try {
+            pocketCaptureView?.let { wm.removeView(it) }
+        } catch (_: Exception) {
+        }
+
+        pocketCaptureView = null
+    }
+
     private fun startFineTune() {
-        if (fineTuning) return
+        if (fineTuning || calibratingPockets) return
+
+        if (!PocketCalibration.isComplete(this)) {
+            statusView?.text = "Calibre os 6 buracos primeiro"
+            statusView?.setTextColor(Color.RED)
+            return
+        }
 
         if (!AutoAimAccessibilityService.isRunning()) {
             statusView?.text = "Acessibilidade OFF"
@@ -348,9 +534,10 @@ class LineService : Service() {
             android.content.res.ColorStateList.valueOf(Color.argb(255, 0, 210, 80))
 
         updateTuneButton(false)
+        updatePocketButton(false)
         updateStopButton(true)
 
-        overlay?.update(emptyList(), emptyList(), null, null, null)
+        overlay?.update(emptyList(), PocketCalibration.toPocketList(this), null, null, null)
 
         statusView?.text = "IA ajustando mira..."
         statusView?.setTextColor(Color.YELLOW)
@@ -364,6 +551,7 @@ class LineService : Service() {
         fineTuning = false
 
         updateTuneButton(true)
+        updatePocketButton(true)
         updateStopButton(false)
 
         statusView?.text = message
@@ -514,7 +702,7 @@ class LineService : Service() {
     }
 
     private fun scanFrame(forceStatus: Boolean = false) {
-        if (processing || fineTuning) return
+        if (processing || fineTuning || calibratingPockets) return
 
         val img = reader?.acquireLatestImage()
         if (img == null) {
@@ -561,17 +749,18 @@ class LineService : Service() {
 
                 val cue = detectorResult.cue
                 val balls = detectorResult.balls
+                val pockets = PocketCalibration.toPocketList(this@LineService)
 
                 overlay?.update(
                     lines = emptyList(),
-                    pockets = emptyList(),
+                    pockets = pockets,
                     cue = cue,
                     rayLine = null,
                     autoShot = null
                 )
 
                 postStatusLimited(
-                    text = "SCAN | branca=${if (cue != null) "OK" else "OFF"} | bolas=${balls.size}",
+                    text = "SCAN | branca=${if (cue != null) "OK" else "OFF"} | bolas=${balls.size} | buracos=${pockets.size}/6",
                     color = if (cue != null) Color.GREEN else Color.YELLOW,
                     force = forceStatus
                 )
@@ -628,6 +817,20 @@ class LineService : Service() {
         }
     }
 
+    private fun updatePocketButton(enabled: Boolean) {
+        main.post {
+            pocketButton?.isEnabled = enabled
+            pocketButton?.backgroundTintList =
+                android.content.res.ColorStateList.valueOf(
+                    if (enabled) {
+                        Color.argb(255, 255, 180, 40)
+                    } else {
+                        Color.argb(255, 100, 100, 100)
+                    }
+                )
+        }
+    }
+
     private fun updateStopButton(enabled: Boolean) {
         main.post {
             stopButton?.isEnabled = enabled
@@ -661,8 +864,10 @@ class LineService : Service() {
         autoScan = false
         processing = false
         fineTuning = false
+        calibratingPockets = false
 
         main.removeCallbacks(scanLoop)
+        removePocketCaptureLayer()
 
         try {
             vDisplay?.release()
@@ -681,8 +886,11 @@ class LineService : Service() {
         autoScan = false
         processing = false
         fineTuning = false
+        calibratingPockets = false
 
         main.removeCallbacksAndMessages(null)
+
+        removePocketCaptureLayer()
 
         try {
             overlay?.let { wm.removeView(it) }
